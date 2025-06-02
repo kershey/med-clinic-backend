@@ -3,6 +3,7 @@ Application configuration settings loaded from environment variables.
 Uses pydantic_settings for validation and type conversion.
 """
 from pydantic_settings import BaseSettings
+from typing import Optional
 
 class Settings(BaseSettings):
     """
@@ -27,6 +28,10 @@ class Settings(BaseSettings):
         
         # Frontend settings
         frontend_url: URL of the frontend application
+        
+        # Bootstrap admin settings (optional)
+        bootstrap_admin_email: Optional admin email for first admin creation
+        bootstrap_admin_password: Optional admin password for first admin creation
     """
     # Database settings
     database_url: str
@@ -49,6 +54,10 @@ class Settings(BaseSettings):
     
     # Frontend settings
     frontend_url: str = "http://localhost:3000"
+    
+    # Bootstrap admin settings (optional - only used for first admin creation)
+    bootstrap_admin_email: Optional[str] = None
+    bootstrap_admin_password: Optional[str] = None
 
     class Config:
         """Configuration for environment variables loading"""

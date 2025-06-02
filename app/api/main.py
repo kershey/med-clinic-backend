@@ -2,6 +2,11 @@
 Main FastAPI application entry point.
 Configures the application, middleware, and includes routers.
 """
+from dotenv import load_dotenv
+
+# Load environment variables from .env file first
+load_dotenv()
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .routes import auth

@@ -18,7 +18,12 @@ from ..models.user import User, UserRole, AccountStatus
 from ..auth.password import hash_password, verify_password
 from ..auth.jwt import create_access_token, get_permissions_for_role
 from ..utils.email import generate_verification_code, send_verification_email
-from ..deps import get_db, get_current_user, require_staff_or_admin, get_current_user_with_verification_status
+from ..deps import get_db, get_current_user, require_staff_or_admin, require_admin, get_current_user_with_verification_status
+import time
+import os
+import smtplib
+import ssl
+import socket
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -101,12 +106,26 @@ async def register_patient(
             "next_step": "verify_email"
         }
     except Exception as e:
-        logger.error(f"Failed to send verification email: {str(e)}")
+        error_str = str(e)
+        logger.error(f"Failed to send verification email: {error_str}")
+        
+        # Provide specific error messages based on the type of failure
+        if "Authentication failed" in error_str:
+            error_detail = "Email authentication failed. Please contact support."
+        elif "configuration is incomplete" in error_str:
+            error_detail = "Email service configuration error. Please contact support."
+        elif "timeout" in error_str.lower() or "connection" in error_str.lower():
+            error_detail = "Email service temporarily unavailable. Please try resend verification."
+        else:
+            error_detail = "Email service unavailable"
+        
         return {
             "message": "Patient account created but verification email failed to send. Please use resend verification.",
             "user_id": user_obj.id,
             "email": patient_data.email,
-            "error": "Email service unavailable"
+            "error": error_detail,
+            "next_step": "resend_verification",
+            "retry_available": True
         }
 
 @router.post("/register/doctor", status_code=status.HTTP_201_CREATED, response_model=Dict)
@@ -536,12 +555,33 @@ async def resend_verification(
     # Send verification email
     try:
         await send_verification_email(email, new_code)
-        return {"message": "Verification email resent successfully"}
+        logger.info(f"Verification email resent successfully to {email}")
+        return {
+            "message": "Verification email resent successfully",
+            "email": email,
+            "next_step": "verify_email"
+        }
     except Exception as e:
-        logger.error(f"Failed to resend verification email: {str(e)}")
+        error_str = str(e)
+        logger.error(f"Failed to resend verification email: {error_str}")
+        
+        # Provide specific error messages based on the type of failure
+        if "Authentication failed" in error_str:
+            error_detail = "Email authentication failed"
+            status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        elif "configuration is incomplete" in error_str:
+            error_detail = "Email service configuration error"
+            status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        elif "timeout" in error_str.lower() or "connection" in error_str.lower():
+            error_detail = "Email service temporarily unavailable. Please try again in a few minutes."
+            status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        else:
+            error_detail = "Failed to send verification email"
+            status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to send verification email"
+            status_code=status_code,
+            detail=error_detail
         )
 
 @router.post("/forgot-password", status_code=status.HTTP_200_OK)
@@ -735,4 +775,99 @@ def update_user_status(
         "old_status": old_status.value,
         "new_status": account_update.new_status.value,
         "updated_by": current_admin.email
-    } 
+    }
+
+@router.get("/email-health", status_code=status.HTTP_200_OK)
+async def check_email_health(
+    current_admin: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Check email service health (Admin only).
+    
+    Args:
+        current_admin: Current admin user
+        db: Database session
+        
+    Returns:
+        Dict with email service status
+    """
+    from app.api.utils.email import validate_email_config, MAIL_SERVER, MAIL_PORT, MAIL_USERNAME
+    import smtplib
+    import ssl
+    import socket
+    
+    logger.info(f"Email health check requested by admin {current_admin.id}")
+    
+    health_status = {
+        "service": "email",
+        "status": "unknown",
+        "checks": {},
+        "timestamp": time.time()
+    }
+    
+    # Check 1: Configuration validation
+    try:
+        config_valid = validate_email_config()
+        health_status["checks"]["configuration"] = {
+            "status": "pass" if config_valid else "fail",
+            "details": "Email configuration is complete" if config_valid else "Missing email configuration"
+        }
+    except Exception as e:
+        health_status["checks"]["configuration"] = {
+            "status": "fail",
+            "details": f"Configuration check failed: {str(e)}"
+        }
+    
+    # Check 2: SMTP server connectivity
+    try:
+        socket.setdefaulttimeout(10)  # 10 second timeout for health check
+        with smtplib.SMTP(MAIL_SERVER, MAIL_PORT, timeout=10) as server:
+            server.ehlo()
+            health_status["checks"]["smtp_connection"] = {
+                "status": "pass",
+                "details": f"Successfully connected to {MAIL_SERVER}:{MAIL_PORT}"
+            }
+    except Exception as e:
+        health_status["checks"]["smtp_connection"] = {
+            "status": "fail",
+            "details": f"Failed to connect to SMTP server: {str(e)}"
+        }
+    
+    # Check 3: SMTP authentication (without sending email)
+    try:
+        if health_status["checks"]["smtp_connection"]["status"] == "pass":
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            
+            with smtplib.SMTP(MAIL_SERVER, MAIL_PORT, timeout=10) as server:
+                server.ehlo()
+                server.starttls(context=context)
+                server.ehlo()
+                server.login(MAIL_USERNAME, os.getenv("MAIL_PASSWORD"))
+                health_status["checks"]["smtp_authentication"] = {
+                    "status": "pass",
+                    "details": "SMTP authentication successful"
+                }
+        else:
+            health_status["checks"]["smtp_authentication"] = {
+                "status": "skip",
+                "details": "Skipped due to connection failure"
+            }
+    except Exception as e:
+        health_status["checks"]["smtp_authentication"] = {
+            "status": "fail",
+            "details": f"SMTP authentication failed: {str(e)}"
+        }
+    
+    # Determine overall status
+    all_checks = list(health_status["checks"].values())
+    if all(check["status"] == "pass" for check in all_checks):
+        health_status["status"] = "healthy"
+    elif any(check["status"] == "fail" for check in all_checks):
+        health_status["status"] = "unhealthy"
+    else:
+        health_status["status"] = "degraded"
+    
+    return health_status 

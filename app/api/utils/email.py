@@ -8,6 +8,8 @@ import string
 import logging
 import smtplib
 import ssl
+import socket
+import time
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import List
@@ -28,6 +30,11 @@ MAIL_FROM = os.getenv("MAIL_FROM")
 MAIL_PORT = int(os.getenv("MAIL_PORT", 587))
 MAIL_SERVER = os.getenv("MAIL_SERVER")
 
+# Connection timeout settings
+SMTP_TIMEOUT = 30  # 30 seconds timeout
+MAX_RETRIES = 3
+RETRY_DELAY = 2  # 2 seconds between retries
+
 # Log email configuration (without password)
 logger.info(f"Email Configuration: SERVER={MAIL_SERVER}, PORT={MAIL_PORT}, FROM={MAIL_FROM}, USERNAME={MAIL_USERNAME}")
 
@@ -44,9 +51,25 @@ def generate_verification_code(length: int = 6) -> str:
     # Create a verification code using uppercase letters and digits
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
 
+def validate_email_config() -> bool:
+    """
+    Validates that all required email configuration variables are set.
+    
+    Returns:
+        bool: True if all required config is present, False otherwise
+    """
+    required_configs = [MAIL_USERNAME, MAIL_PASSWORD, MAIL_FROM, MAIL_SERVER]
+    missing_configs = [config for config in required_configs if not config]
+    
+    if missing_configs:
+        logger.error(f"Missing email configuration: {missing_configs}")
+        return False
+    
+    return True
+
 async def send_verification_email(email: EmailStr, code: str) -> None:
     """
-    Sends a verification email to the user using direct SMTP.
+    Sends a verification email to the user using direct SMTP with retry logic.
     
     Args:
         email: User's email address
@@ -54,7 +77,13 @@ async def send_verification_email(email: EmailStr, code: str) -> None:
         
     Returns:
         None
+        
+    Raises:
+        Exception: If email sending fails after all retries
     """
+    if not validate_email_config():
+        raise Exception("Email configuration is incomplete")
+    
     logger.info(f"Attempting to send verification email to {email} with code {code}")
     
     # Create HTML body for verification email
@@ -102,32 +131,80 @@ async def send_verification_email(email: EmailStr, code: str) -> None:
     # Attach HTML content
     msg.attach(MIMEText(html_content, "html"))
     
-    try:
-        # Create SMTP session
-        logger.info(f"Connecting to SMTP server {MAIL_SERVER}:{MAIL_PORT}...")
-        
-        # Create a secure SSL context that works on macOS
-        context = ssl.create_default_context()
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
-        
-        with smtplib.SMTP(MAIL_SERVER, MAIL_PORT) as server:
-            server.ehlo()
-            server.starttls(context=context)
-            server.ehlo()
+    # Retry logic for email sending
+    last_exception = None
+    
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            logger.info(f"Email send attempt {attempt}/{MAX_RETRIES} to {email}")
             
-            # Login to server
-            logger.info(f"Logging in with username: {MAIL_USERNAME}")
-            server.login(MAIL_USERNAME, MAIL_PASSWORD)
+            # Create SMTP session with timeout
+            logger.info(f"Connecting to SMTP server {MAIL_SERVER}:{MAIL_PORT}...")
             
-            # Send email
-            logger.info(f"Sending email to {email}...")
-            server.send_message(msg)
+            # Create a secure SSL context that works on macOS
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
             
-        logger.info(f"Email sent successfully to {email}")
-    except Exception as e:
-        logger.error(f"Failed to send email: {str(e)}")
-        raise
+            # Set socket timeout
+            socket.setdefaulttimeout(SMTP_TIMEOUT)
+            
+            with smtplib.SMTP(MAIL_SERVER, MAIL_PORT, timeout=SMTP_TIMEOUT) as server:
+                # Enable debug output for troubleshooting
+                server.set_debuglevel(0)  # Set to 1 for detailed debug output
+                
+                server.ehlo()
+                logger.info("Starting TLS...")
+                server.starttls(context=context)
+                server.ehlo()
+                
+                # Login to server
+                logger.info(f"Logging in with username: {MAIL_USERNAME}")
+                server.login(MAIL_USERNAME, MAIL_PASSWORD)
+                
+                # Send email
+                logger.info(f"Sending email to {email}...")
+                server.send_message(msg)
+                
+            logger.info(f"Email sent successfully to {email} on attempt {attempt}")
+            return  # Success, exit function
+            
+        except smtplib.SMTPAuthenticationError as e:
+            logger.error(f"SMTP Authentication failed on attempt {attempt}: {str(e)}")
+            logger.error("Check your Gmail App Password. You may need to generate a new one.")
+            last_exception = e
+            break  # Don't retry authentication errors
+            
+        except smtplib.SMTPRecipientsRefused as e:
+            logger.error(f"SMTP Recipients refused on attempt {attempt}: {str(e)}")
+            last_exception = e
+            break  # Don't retry recipient errors
+            
+        except smtplib.SMTPServerDisconnected as e:
+            logger.warning(f"SMTP server disconnected on attempt {attempt}: {str(e)}")
+            last_exception = e
+            if attempt < MAX_RETRIES:
+                logger.info(f"Retrying in {RETRY_DELAY} seconds...")
+                time.sleep(RETRY_DELAY)
+                
+        except (smtplib.SMTPConnectError, socket.timeout, socket.gaierror) as e:
+            logger.warning(f"SMTP connection error on attempt {attempt}: {str(e)}")
+            last_exception = e
+            if attempt < MAX_RETRIES:
+                logger.info(f"Retrying in {RETRY_DELAY} seconds...")
+                time.sleep(RETRY_DELAY)
+                
+        except Exception as e:
+            logger.error(f"Unexpected error on attempt {attempt}: {str(e)}")
+            last_exception = e
+            if attempt < MAX_RETRIES:
+                logger.info(f"Retrying in {RETRY_DELAY} seconds...")
+                time.sleep(RETRY_DELAY)
+    
+    # All retries failed
+    error_msg = f"Failed to send email after {MAX_RETRIES} attempts. Last error: {str(last_exception)}"
+    logger.error(error_msg)
+    raise Exception(error_msg)
 
 async def send_verification_email_background(background_tasks: BackgroundTasks, email: EmailStr, code: str) -> None:
     """
@@ -147,7 +224,7 @@ async def send_verification_email_background(background_tasks: BackgroundTasks, 
 
 async def send_password_reset_email(email: EmailStr, token: str) -> None:
     """
-    Sends a password reset email with a reset link.
+    Sends a password reset email with a reset link using retry logic.
     
     Args:
         email: User's email address
@@ -155,7 +232,13 @@ async def send_password_reset_email(email: EmailStr, token: str) -> None:
         
     Returns:
         None
+        
+    Raises:
+        Exception: If email sending fails after all retries
     """
+    if not validate_email_config():
+        raise Exception("Email configuration is incomplete")
+    
     # Create HTML body for password reset email
     reset_link = f"{os.getenv('FRONTEND_URL', 'http://localhost:3000')}/reset-password?token={token}"
     html_content = f"""
@@ -204,28 +287,76 @@ async def send_password_reset_email(email: EmailStr, token: str) -> None:
     # Attach HTML content
     msg.attach(MIMEText(html_content, "html"))
     
-    try:
-        # Create SMTP session
-        logger.info(f"Connecting to SMTP server {MAIL_SERVER}:{MAIL_PORT}...")
-        
-        # Create a secure SSL context that works on macOS
-        context = ssl.create_default_context()
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
-        
-        with smtplib.SMTP(MAIL_SERVER, MAIL_PORT) as server:
-            server.ehlo()
-            server.starttls(context=context)
-            server.ehlo()
+    # Retry logic for email sending
+    last_exception = None
+    
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            logger.info(f"Password reset email send attempt {attempt}/{MAX_RETRIES} to {email}")
             
-            # Login to server
-            server.login(MAIL_USERNAME, MAIL_PASSWORD)
+            # Create SMTP session with timeout
+            logger.info(f"Connecting to SMTP server {MAIL_SERVER}:{MAIL_PORT}...")
             
-            # Send email
-            logger.info(f"Sending password reset email to {email}...")
-            server.send_message(msg)
+            # Create a secure SSL context that works on macOS
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
             
-        logger.info(f"Password reset email sent successfully to {email}")
-    except Exception as e:
-        logger.error(f"Failed to send password reset email: {str(e)}")
-        raise 
+            # Set socket timeout
+            socket.setdefaulttimeout(SMTP_TIMEOUT)
+            
+            with smtplib.SMTP(MAIL_SERVER, MAIL_PORT, timeout=SMTP_TIMEOUT) as server:
+                server.set_debuglevel(0)  # Set to 1 for detailed debug output
+                
+                server.ehlo()
+                logger.info("Starting TLS...")
+                server.starttls(context=context)
+                server.ehlo()
+                
+                # Login to server
+                logger.info(f"Logging in with username: {MAIL_USERNAME}")
+                server.login(MAIL_USERNAME, MAIL_PASSWORD)
+                
+                # Send email
+                logger.info(f"Sending password reset email to {email}...")
+                server.send_message(msg)
+                
+            logger.info(f"Password reset email sent successfully to {email} on attempt {attempt}")
+            return  # Success, exit function
+            
+        except smtplib.SMTPAuthenticationError as e:
+            logger.error(f"SMTP Authentication failed on attempt {attempt}: {str(e)}")
+            logger.error("Check your Gmail App Password. You may need to generate a new one.")
+            last_exception = e
+            break  # Don't retry authentication errors
+            
+        except smtplib.SMTPRecipientsRefused as e:
+            logger.error(f"SMTP Recipients refused on attempt {attempt}: {str(e)}")
+            last_exception = e
+            break  # Don't retry recipient errors
+            
+        except smtplib.SMTPServerDisconnected as e:
+            logger.warning(f"SMTP server disconnected on attempt {attempt}: {str(e)}")
+            last_exception = e
+            if attempt < MAX_RETRIES:
+                logger.info(f"Retrying in {RETRY_DELAY} seconds...")
+                time.sleep(RETRY_DELAY)
+                
+        except (smtplib.SMTPConnectError, socket.timeout, socket.gaierror) as e:
+            logger.warning(f"SMTP connection error on attempt {attempt}: {str(e)}")
+            last_exception = e
+            if attempt < MAX_RETRIES:
+                logger.info(f"Retrying in {RETRY_DELAY} seconds...")
+                time.sleep(RETRY_DELAY)
+                
+        except Exception as e:
+            logger.error(f"Unexpected error on attempt {attempt}: {str(e)}")
+            last_exception = e
+            if attempt < MAX_RETRIES:
+                logger.info(f"Retrying in {RETRY_DELAY} seconds...")
+                time.sleep(RETRY_DELAY)
+    
+    # All retries failed
+    error_msg = f"Failed to send password reset email after {MAX_RETRIES} attempts. Last error: {str(last_exception)}"
+    logger.error(error_msg)
+    raise Exception(error_msg) 

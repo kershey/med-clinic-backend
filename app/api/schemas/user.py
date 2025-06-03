@@ -53,7 +53,6 @@ class DoctorRegistration(UserCreate):
     - bio: Professional biography (optional)
     """
     specialization: str = Field(..., description="Doctor's medical specialization")
-    license_number: str = Field(..., description="Medical license number")
     bio: Optional[str] = Field(None, description="Professional biography")
 
 class StaffRegistration(UserCreate):
@@ -64,17 +63,19 @@ class StaffRegistration(UserCreate):
     - department: Staff department/role
     - employee_id: Employee identification number
     """
-    department: str = Field(..., description="Staff department/role")
-    employee_id: str = Field(..., description="Employee identification number")
+    # department: str = Field(..., description="Staff department/role")
+    # employee_id: str = Field(..., description="Employee identification number")
 
 class AdminRegistration(UserCreate):
     """
-    Admin Registration Schema - Used for admin account creation
+    Admin Registration Schema - Used for admin self-registration
     
     Includes:
     - admin_level: Level of admin access (1-5, where 5 is highest)
+    - justification: Reason for requesting admin access
     """
     admin_level: int = Field(default=1, ge=1, le=5, description="Admin access level")
+    justification: str = Field(..., description="Reason for requesting admin access")
 
 class UserLogin(BaseModel):
     """
@@ -97,6 +98,15 @@ class UserVerify(BaseModel):
     """
     email: EmailStr
     verification_code: str
+
+class ResendVerification(BaseModel):
+    """
+    Resend Verification Schema - Used to resend verification email
+    
+    Fields:
+    - email: User's email address
+    """
+    email: EmailStr
 
 class PasswordReset(BaseModel):
     """
@@ -144,6 +154,8 @@ class UserResponse(BaseModel):
     - gender: User's gender (if provided)
     - address: User's address (if provided)
     - contact: User's contact number (if provided)
+    - department: Staff department/role (if provided)
+    - employee_id: Employee identification number (if provided)
     - is_active: Whether user account is active (deprecated)
     - is_verified: Whether email has been verified
     - role: User role (patient, doctor, staff, admin)

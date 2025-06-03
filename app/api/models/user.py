@@ -53,6 +53,8 @@ class User(Base):
     - gender: User's gender (optional)
     - address: User's physical address (optional)
     - contact: User's contact number (optional)
+    - department: Department for staff users (optional)
+    - employee_id: Employee ID for staff users (optional)
     - password_hash: Securely hashed password (never store raw passwords)
     - is_active: Whether user account is active (deprecated - use status)
     - is_verified: Whether email has been verified

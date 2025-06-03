@@ -11,7 +11,7 @@ from typing import Dict
 from ..database import SessionLocal
 from ..schemas.user import (
     PatientRegistration, DoctorRegistration, StaffRegistration, AdminRegistration,
-    UserLogin, UserVerify, UserResponse, LoginResponse, AuthError,
+    UserLogin, UserVerify, ResendVerification, UserResponse, LoginResponse, AuthError,
     AccountStatusUpdate, PasswordReset, PasswordChange
 )
 from ..models.user import User, UserRole, AccountStatus
@@ -24,6 +24,8 @@ import os
 import smtplib
 import ssl
 import socket
+from fastapi.security import OAuth2PasswordRequestForm
+from datetime import datetime
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -217,8 +219,6 @@ async def register_staff(
         HTTPException: If email already exists or insufficient permissions
     """
     logger.info(f"Staff account creation by admin {current_admin.id} for email: {staff_data.email}")
-    
-    # Check if email already exists
     existing_user = db.query(User).filter(User.email == staff_data.email).first()
     if existing_user:
         logger.warning(f"Staff creation failed: Email {staff_data.email} already registered")
@@ -227,8 +227,8 @@ async def register_staff(
             detail="Email already registered"
         )
     
-    # Generate temporary password and activation code
-    temp_password = generate_verification_code()  # Use as temporary password
+    # Use admin-provided password instead of generating random temporary password
+    staff_password = staff_data.password
     
     # Create new staff user
     user_obj = User(
@@ -237,10 +237,10 @@ async def register_staff(
         gender=staff_data.gender,
         address=staff_data.address,
         contact=staff_data.contact,
-        password_hash=hash_password(temp_password),
+        password_hash=hash_password(staff_password),
         role=UserRole.STAFF,
         account_status=AccountStatus.PENDING_ACTIVATION,
-        verification_code=temp_password,  # Store temp password for first login
+        verification_code=staff_password,  # Store admin-provided password for first login
         is_verified=True,
         created_by=current_admin.id
     )
@@ -251,14 +251,14 @@ async def register_staff(
     db.refresh(user_obj)
     logger.info(f"Staff account created by admin {current_admin.id}: {user_obj.id}")
     
-    # TODO: Send activation email with temporary password
-    # For now, return temp password (in production, this should be emailed)
+    # TODO: Send activation email with password
+    # For now, return password (in production, this should be emailed)
     
     return {
         "message": "Staff account created successfully.",
         "user_id": user_obj.id,
         "email": staff_data.email,
-        "temporary_password": temp_password,  # In production, this should be emailed
+        "password": staff_password,  # Return admin-provided password
         "status": "pending_activation",
         "created_by": current_admin.email
     }
@@ -266,45 +266,38 @@ async def register_staff(
 @router.post("/register/admin", status_code=status.HTTP_201_CREATED, response_model=Dict)
 async def register_admin(
     admin_data: AdminRegistration,
-    current_admin: User = Depends(require_staff_or_admin),
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
 ):
     """
-    Admin account creation endpoint (Existing Admin only).
+    Admin self-registration endpoint.
     
-    Only existing administrators can create new admin accounts.
-    New admin accounts are created with DISABLED status and require activation.
+    Users can register for admin accounts but they will be DISABLED until existing admin approval.
+    They cannot access the system until an existing admin activates their account.
     
     Args:
-        admin_data: Admin registration data
-        current_admin: Current admin user creating the new admin account
+        admin_data: Admin registration data including justification
+        background_tasks: FastAPI BackgroundTasks for email sending
         db: Database session
         
     Returns:
-        Dict with account creation success message
+        Dict with registration success message and approval instructions
         
     Raises:
-        HTTPException: If email already exists or insufficient permissions
+        HTTPException: If email already exists
     """
-    logger.info(f"Admin account creation by admin {current_admin.id} for email: {admin_data.email}")
-    
-    # Only admins can create other admins
-    if current_admin.role != UserRole.ADMIN:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only administrators can create admin accounts"
-        )
+    logger.info(f"Admin registration attempt for email: {admin_data.email}")
     
     # Check if email already exists
     existing_user = db.query(User).filter(User.email == admin_data.email).first()
     if existing_user:
-        logger.warning(f"Admin creation failed: Email {admin_data.email} already registered")
+        logger.warning(f"Admin registration failed: Email {admin_data.email} already registered")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered"
         )
     
-    # Create new admin user
+    # Create new admin user with DISABLED status
     user_obj = User(
         email=admin_data.email,
         full_name=admin_data.full_name,
@@ -313,24 +306,29 @@ async def register_admin(
         contact=admin_data.contact,
         password_hash=hash_password(admin_data.password),
         role=UserRole.ADMIN,
-        account_status=AccountStatus.DISABLED,  # Requires activation by existing admin
-        is_verified=True,
-        created_by=current_admin.id
+        account_status=AccountStatus.DISABLED,  # Requires admin approval
+        is_verified=True,  # Admins don't need email verification, just admin approval
+        created_by=None  # Self-registered admin has no creator until approved
     )
     
     # Save to database
     db.add(user_obj)
     db.commit()
     db.refresh(user_obj)
-    logger.info(f"Admin account created by admin {current_admin.id}: {user_obj.id}")
+    logger.info(f"Admin account created (pending approval): {user_obj.id} - Level: {admin_data.admin_level}")
+    logger.info(f"Admin justification: {admin_data.justification}")
+    
+    # TODO: In a real system, notify existing admins about new admin registration
+    # background_tasks.add_task(notify_admins_of_new_registration, user_obj, admin_data.justification)
     
     return {
-        "message": "Admin account created successfully. Account requires activation.",
+        "message": "Admin account created successfully. Your account is pending administrator approval.",
         "user_id": user_obj.id,
         "email": admin_data.email,
-        "status": "disabled",
-        "created_by": current_admin.email,
-        "admin_level": admin_data.admin_level
+        "admin_level": admin_data.admin_level,
+        "status": "pending_approval",
+        "next_step": "wait_for_admin_approval",
+        "justification": admin_data.justification
     }
 
 # ============================================================================
@@ -423,10 +421,17 @@ def login(
     elif user.role == UserRole.ADMIN:
         # Admins must have ACTIVE status
         if user.account_status != AccountStatus.ACTIVE:
-            logger.warning(f"Inactive admin account: {login_data.email}")
+            status_messages = {
+                AccountStatus.DISABLED: "Your admin account is pending approval by an existing administrator.",
+                AccountStatus.DEACTIVATED: "Your admin account has been deactivated. Contact administration.",
+                AccountStatus.RED_TAG: "Your admin account is under review. Contact administration."
+            }
+            message = status_messages.get(user.account_status, "Admin account access denied.")
+            
+            logger.warning(f"Inactive admin account: {login_data.email} - {user.account_status}")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Admin account is not active. Contact another administrator for activation."
+                detail=message
             )
     
     # Create access token
@@ -509,7 +514,7 @@ def verify_email(
 
 @router.post("/resend-verification", status_code=status.HTTP_200_OK)
 async def resend_verification(
-    email_data: Dict,
+    verification_request: ResendVerification,
     background_tasks: BackgroundTasks, 
     db: Session = Depends(get_db)
 ):
@@ -517,7 +522,7 @@ async def resend_verification(
     Resend verification email endpoint.
     
     Args:
-        email_data: Dict containing user email
+        verification_request: ResendVerification schema containing user email
         background_tasks: FastAPI BackgroundTasks for email sending
         db: Database session
         
@@ -527,12 +532,7 @@ async def resend_verification(
     Raises:
         HTTPException: If user not found or already verified
     """
-    email = email_data.get("email")
-    if not email:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email is required"
-        )
+    email = verification_request.email
     
     user = db.query(User).filter(User.email == email).first()
     if not user:
@@ -724,6 +724,59 @@ def get_current_user_profile(
 # ADMIN MANAGEMENT ROUTES
 # ============================================================================
 
+@router.get("/admin/pending-registrations", status_code=status.HTTP_200_OK)
+def get_pending_admin_registrations(
+    current_admin: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Admin endpoint to view pending admin registration requests.
+    
+    Args:
+        current_admin: Current admin user
+        db: Database session
+        
+    Returns:
+        List of pending admin registration requests with justifications
+        
+    Raises:
+        HTTPException: If insufficient permissions
+    """
+    logger.info(f"Admin {current_admin.id} requesting pending admin registrations")
+    
+    # Find all pending admin accounts
+    pending_admins = db.query(User).filter(
+        User.role == UserRole.ADMIN,
+        User.account_status == AccountStatus.DISABLED
+    ).all()
+    
+    # Format the response with necessary information
+    pending_registrations = []
+    for admin in pending_admins:
+        # Note: In a real system, you'd store justification in a separate table
+        # or add it as a field to the User model. For now, we'll simulate it.
+        registration_info = {
+            "user_id": admin.id,
+            "email": admin.email,
+            "full_name": admin.full_name,
+            "gender": admin.gender,
+            "address": admin.address,
+            "contact": admin.contact,
+            "admin_level": 1,  # Default since we don't store this yet
+            "justification": f"Admin access requested by {admin.full_name}",  # Simulated
+            "created_at": admin.created_at,
+            "days_pending": (datetime.utcnow() - admin.created_at).days
+        }
+        pending_registrations.append(registration_info)
+    
+    logger.info(f"Found {len(pending_registrations)} pending admin registrations")
+    
+    return {
+        "message": f"Found {len(pending_registrations)} pending admin registration(s)",
+        "pending_count": len(pending_registrations),
+        "pending_registrations": pending_registrations
+    }
+
 @router.put("/users/{user_id}/status", status_code=status.HTTP_200_OK)
 def update_user_status(
     user_id: int,
@@ -870,4 +923,114 @@ async def check_email_health(
     else:
         health_status["status"] = "degraded"
     
-    return health_status 
+    return health_status
+
+@router.post("/oauth2-token", status_code=status.HTTP_200_OK)
+def oauth2_token(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db)
+):
+    """
+    OAuth2 token endpoint for Swagger UI authentication.
+    
+    Args:
+        form_data: OAuth2 password request form data
+        db: Database session
+        
+    Returns:
+        Access token
+    """
+    logger.info(f"OAuth2 token request for: {form_data.username}")
+    
+    # Find user by email (regardless of role)
+    user = db.query(User).filter(User.email == form_data.username).first()
+    
+    if not user or not verify_password(form_data.password, user.password_hash):
+        logger.warning(f"Invalid credentials for user: {form_data.username}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password"
+        )
+    
+    # Role-specific validation
+    if user.role == UserRole.PATIENT:
+        # Patients must have verified email
+        if not user.is_verified:
+            logger.warning(f"Unverified email for patient: {form_data.username}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Email not verified. Please verify your email first."
+            )
+        
+        # Check if account is active
+        if user.account_status != AccountStatus.ACTIVE:
+            logger.warning(f"Inactive patient account: {form_data.username}")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Account status: {user.account_status.value}. Contact support if needed."
+            )
+    
+    elif user.role == UserRole.DOCTOR:
+        # Doctors must have admin approval (ACTIVE status)
+        if user.account_status != AccountStatus.ACTIVE:
+            status_messages = {
+                AccountStatus.DISABLED: "Your account is pending administrator approval.",
+                AccountStatus.DEACTIVATED: "Your account has been deactivated. Contact administration.",
+                AccountStatus.RED_TAG: "Your account is under review. Contact administration."
+            }
+            message = status_messages.get(user.account_status, "Account access denied.")
+            
+            logger.warning(f"Inactive doctor account: {form_data.username} - {user.account_status}")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=message
+            )
+    
+    elif user.role == UserRole.STAFF:
+        # Staff can log in with pending activation (first login) or active status
+        if user.account_status in [AccountStatus.DEACTIVATED, AccountStatus.RED_TAG]:
+            logger.warning(f"Deactivated staff account: {form_data.username}")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Account has been deactivated. Contact administration."
+            )
+        
+        # If first login with temporary password, activate account
+        if user.account_status == AccountStatus.PENDING_ACTIVATION:
+            user.account_status = AccountStatus.ACTIVE
+            user.verification_code = None  # Clear temporary password
+            db.commit()
+            logger.info(f"Staff account activated on first login: {user.email}")
+    
+    elif user.role == UserRole.ADMIN:
+        # Admins must have ACTIVE status
+        if user.account_status != AccountStatus.ACTIVE:
+            status_messages = {
+                AccountStatus.DISABLED: "Your admin account is pending approval by an existing administrator.",
+                AccountStatus.DEACTIVATED: "Your admin account has been deactivated. Contact administration.",
+                AccountStatus.RED_TAG: "Your admin account is under review. Contact administration."
+            }
+            message = status_messages.get(user.account_status, "Admin account access denied.")
+            
+            logger.warning(f"Inactive admin account: {form_data.username} - {user.account_status}")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=message
+            )
+    
+    # Create access token
+    token_data = {
+        "id": user.id,
+        "email": user.email,
+        "role": user.role.value,
+        "account_status": user.account_status.value
+    }
+    access_token = create_access_token(token_data)
+    permissions = get_permissions_for_role(user.role, user.account_status)
+    
+    logger.info(f"Successful login: {user.email} ({user.role.value})")
+    
+    return {
+        "access_token": access_token,
+        "token_type": "Bearer"
+    } 

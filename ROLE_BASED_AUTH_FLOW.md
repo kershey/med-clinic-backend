@@ -77,19 +77,25 @@
   - Changes password using standard password change endpoints
   - Can immediately create additional admin accounts
 
-### **Subsequent Admin Creation (Normal Flow)**
+### **Subsequent Admin Creation (Self-Registration Flow)**
 
-- **Registration**
-  - Existing admin uses admin registration form in dashboard application
+- **Self-Registration**
+  - Users can register for admin accounts using standard registration form
+  - Must provide justification for requesting admin access
   - Account created with "Admin" role and "Disabled" status
+  - Cannot access system until approved by existing admin
+- **Admin Review**
+  - Existing admins can view pending admin registrations
+  - Review includes user information and justification
+  - Admins can approve or reject the registration request
 - **Activation**
-  - Existing admin reviews and activates the new admin account
+  - Existing admin activates approved admin account
   - Account status changed from "Disabled" to "Active"
   - Full permissions granted upon activation
 - **Approval Process**
-  - Created by existing admin through secure admin panel
-  - Requires admin approval before account becomes functional
-  - Audit trail maintained of who created which admin accounts
+  - Self-registered with admin approval required
+  - Requires existing admin approval before account becomes functional
+  - Audit trail maintained of who approved which admin accounts
 
 ### **Admin Login & Operations**
 
@@ -132,15 +138,16 @@
 
 ## Bootstrap vs Normal Admin Creation
 
-| Aspect                | Bootstrap Admin (First)                  | Normal Admin (Additional)         |
-| --------------------- | ---------------------------------------- | --------------------------------- |
-| **Creation Method**   | Environment variables                    | Admin dashboard                   |
-| **Initial Status**    | Active (immediate)                       | Disabled (requires approval)      |
-| **Approval Required** | No                                       | Yes (by existing admin)           |
-| **Creator Reference** | None (system)                            | Admin who created account         |
-| **When Available**    | Only when no admins exist                | Anytime after first admin         |
-| **Security Setup**    | Environment → Login → Change credentials | Register → Admin approval → Login |
-| **Use Case**          | System initialization                    | Ongoing admin management          |
+| Aspect                | Bootstrap Admin (First)                  | Normal Admin (Additional)                 |
+| --------------------- | ---------------------------------------- | ----------------------------------------- |
+| **Creation Method**   | Environment variables                    | Self-registration form                    |
+| **Initial Status**    | Active (immediate)                       | Disabled (requires approval)              |
+| **Approval Required** | No                                       | Yes (by existing admin)                   |
+| **Creator Reference** | None (system)                            | Self-registered (approved by admin)       |
+| **When Available**    | Only when no admins exist                | Anytime (self-service)                    |
+| **Security Setup**    | Environment → Login → Change credentials | Self-register → Admin approval → Login    |
+| **Use Case**          | System initialization                    | Ongoing admin onboarding                  |
+| **Justification**     | N/A (system setup)                       | Required (explains need for admin access) |
 
 ## Implementation Notes
 

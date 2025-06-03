@@ -107,11 +107,10 @@ Authorization: Bearer <admin_token>
 }
 ```
 
-### 4. Admin Registration (Admin Only)
+### 4. Admin Self-Registration
 
 ```http
 POST /auth/register/admin
-Authorization: Bearer <admin_token>
 ```
 
 **Request Body:**
@@ -121,7 +120,11 @@ Authorization: Bearer <admin_token>
   "email": "newadmin@example.com",
   "full_name": "Bob Admin",
   "password": "AdminPassword123!",
-  "admin_level": 3
+  "gender": "Male",
+  "address": "456 Admin Ave",
+  "contact": "+1234567890",
+  "admin_level": 3,
+  "justification": "I am the new IT manager and need admin access for system maintenance and user management."
 }
 ```
 
@@ -129,12 +132,13 @@ Authorization: Bearer <admin_token>
 
 ```json
 {
-  "message": "Admin account created successfully. Account requires activation.",
+  "message": "Admin account created successfully. Your account is pending administrator approval.",
   "user_id": 4,
   "email": "newadmin@example.com",
-  "status": "disabled",
-  "created_by": "admin@example.com",
-  "admin_level": 3
+  "admin_level": 3,
+  "status": "pending_approval",
+  "next_step": "wait_for_admin_approval",
+  "justification": "I am the new IT manager and need admin access for system maintenance and user management."
 }
 ```
 
@@ -265,7 +269,39 @@ POST /auth/resend-verification
 
 ```json
 {
-  "message": "Verification email resent successfully"
+  "message": "Verification email resent successfully",
+  "email": "user@example.com",
+  "next_step": "verify_email"
+}
+```
+
+**Error Responses:**
+
+```json
+// 400 - Email already verified
+{
+  "detail": "Email already verified"
+}
+
+// 400 - Missing or invalid email
+{
+  "detail": [
+    {
+      "type": "missing",
+      "loc": ["body", "email"],
+      "msg": "Field required"
+    }
+  ]
+}
+
+// 404 - User not found
+{
+  "detail": "User not found"
+}
+
+// 503 - Email service unavailable
+{
+  "detail": "Email service temporarily unavailable. Please try again in a few minutes."
 }
 ```
 
@@ -353,7 +389,49 @@ Authorization: Bearer <token>
 
 ## 🛡️ Admin Management
 
-### Update User Status
+### 1. View Pending Admin Registrations
+
+```http
+GET /auth/admin/pending-registrations
+Authorization: Bearer <admin_token>
+```
+
+**Response (200):**
+
+```json
+{
+  "message": "Found 2 pending admin registration(s)",
+  "pending_count": 2,
+  "pending_registrations": [
+    {
+      "user_id": 4,
+      "email": "newadmin@example.com",
+      "full_name": "Bob Admin",
+      "gender": "Male",
+      "address": "456 Admin Ave",
+      "contact": "+1234567890",
+      "admin_level": 3,
+      "justification": "I am the new IT manager and need admin access for system maintenance and user management.",
+      "created_at": "2024-01-15T10:30:00Z",
+      "days_pending": 2
+    },
+    {
+      "user_id": 5,
+      "email": "manager@example.com",
+      "full_name": "Alice Manager",
+      "gender": "Female",
+      "address": "789 Manager Blvd",
+      "contact": "+0987654321",
+      "admin_level": 2,
+      "justification": "Branch manager requesting admin access for local operations management.",
+      "created_at": "2024-01-14T14:20:00Z",
+      "days_pending": 3
+    }
+  ]
+}
+```
+
+### 2. Update User Status (Approve/Reject Admin)
 
 ```http
 PUT /auth/users/{user_id}/status

@@ -11,7 +11,7 @@ from .models.user import User, UserRole, AccountStatus
 from .auth.jwt import verify_token, verify_account_status
 
 # OAuth2 scheme for JWT token authentication
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/oauth2-token")
 
 def get_db():
     """

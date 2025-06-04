@@ -65,6 +65,14 @@ class User(Base):
     - created_at: Timestamp when user was created
     - updated_at: Timestamp when user was last updated
     - created_by: ID of admin/staff who created this account (for staff/doctor accounts)
+    
+    Password Reset Fields:
+    - reset_token_hash: Hashed reset token for secure password reset
+    - reset_token_expires: When the reset token expires
+    - reset_token_created: When the reset token was created
+    - reset_attempts_count: Number of reset attempts (for rate limiting)
+    - reset_locked_until: When account is locked until (for abuse prevention)
+    - password_changed_at: When password was last changed
     """
     __tablename__ = "users"
 
@@ -84,6 +92,14 @@ class User(Base):
     created_by = Column(Integer, nullable=True)  # Foreign key to admin/staff who created this account
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    # Password Reset Fields
+    reset_token_hash = Column(String, nullable=True)
+    reset_token_expires = Column(DateTime(timezone=True), nullable=True)
+    reset_token_created = Column(DateTime(timezone=True), nullable=True)
+    reset_attempts_count = Column(Integer, default=0)
+    reset_locked_until = Column(DateTime(timezone=True), nullable=True)
+    password_changed_at = Column(DateTime(timezone=True), nullable=True)
 
     @property
     def account_status(self):

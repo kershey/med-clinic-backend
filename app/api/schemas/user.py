@@ -143,6 +143,24 @@ class AccountStatusUpdate(BaseModel):
     new_status: AccountStatus
     reason: Optional[str] = None
 
+class AdminApprovalRequest(BaseModel):
+    """
+    Admin Approval Request Schema - Used for approving admin registration
+    
+    Fields:
+    - reason: Reason for approving the admin registration
+    """
+    reason: str = Field(..., description="Reason for approving admin registration", min_length=10)
+
+class AdminRejectionRequest(BaseModel):
+    """
+    Admin Rejection Request Schema - Used for rejecting admin registration
+    
+    Fields:
+    - reason: Reason for rejecting the admin registration
+    """
+    reason: str = Field(..., description="Reason for rejecting admin registration", min_length=10)
+
 class UserResponse(BaseModel):
     """
     User Response Schema - Used when returning user data

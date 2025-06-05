@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  api:
+    build: .
+    container_name: appointment-api
+    restart: always
+    ports:
+      - '8000:8000'
+    depends_on:
+      - db
+    env_file:
+      - .env
+    volumes:
+      - ./src:/app/src
+    networks:
+      - appointment-network
+
+  db:
+    image: postgres:15-alpine
+    container_name: appointment-db
+    restart: always
+    ports:
+      - '5432:5432'
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-appointment_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - appointment-network
+
+networks:
+  appointment-network:
+    driver: bridge
+
+volumes:
+  postgres_data:

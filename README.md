@@ -1,6 +1,130 @@
-# Java Medical Clinic - Backend API
+# Appointment System Backend
 
-A FastAPI-based backend for the Java Medical Clinic appointment system.
+A FastAPI-based backend for a medical clinic appointment system.
+
+## Project Structure
+
+The project follows a domain-driven design with the following structure:
+
+```
+backend-fastapi/
+├── src/                      # Source code
+│   ├── auth/                 # Authentication domain
+│   ├── appointments/         # Appointments domain
+│   ├── patients/             # Patients domain
+│   ├── doctors/              # Doctors domain
+│   ├── core/                 # Core utilities
+│   ├── config.py             # Application configuration
+│   ├── database.py           # Database connection
+│   ├── exceptions.py         # Global exception handling
+│   └── main.py               # Main application entry point
+├── tests/                    # Test suite
+├── alembic/                  # Database migrations
+├── requirements/             # Requirements files
+├── .env.example              # Environment variables template
+├── docker-compose.yml        # Docker Compose configuration
+├── Dockerfile                # Docker configuration
+└── README.md                 # Project documentation
+```
+
+## Setup
+
+### Prerequisites
+
+- Python 3.9+
+- PostgreSQL
+- Docker (optional)
+
+### Local Development
+
+1. Clone the repository:
+
+   ```
+   git clone <repository-url>
+   cd backend-fastapi
+   ```
+
+2. Create a virtual environment:
+
+   ```
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
+
+3. Install development dependencies:
+
+   ```
+   pip install -r requirements/dev.txt
+   ```
+
+4. Create a `.env` file based on `.env.example`:
+
+   ```
+   cp .env.example .env
+   ```
+
+5. Update the `.env` file with your configuration.
+
+6. Run the application:
+   ```
+   uvicorn src.main:app --reload
+   ```
+
+### Docker Development
+
+1. Clone the repository:
+
+   ```
+   git clone <repository-url>
+   cd backend-fastapi
+   ```
+
+2. Create a `.env` file based on `.env.example`:
+
+   ```
+   cp .env.example .env
+   ```
+
+3. Update the `.env` file with your configuration.
+
+4. Start the Docker containers:
+   ```
+   docker-compose up -d
+   ```
+
+## API Documentation
+
+- Swagger UI: http://localhost:8000/docs
+- ReDoc: http://localhost:8000/redoc
+
+## Testing
+
+Run tests with pytest:
+
+```
+pytest
+```
+
+For test coverage:
+
+```
+coverage run -m pytest
+coverage report
+```
+
+## Database Migrations
+
+Create a new migration:
+
+```
+alembic revision --autogenerate -m "Description of changes"
+```
+
+Apply migrations:
+
+```
+alembic upgrade head
+```
 
 ## 🔍 Overview
 
@@ -133,7 +257,7 @@ backend-fastapi/
 │   │   ├── schemas/           # Pydantic schemas
 │   │   │   └── user.py        # User schemas
 │   │   ├── utils/             # Utility functions
-│   │   │   └── email.py       # Email sending utilities
+│   │   │   └──        # Email sending utilities
 │   │   ├── config.py          # Application settings
 │   │   ├── database.py        # Database configuration
 │   │   ├── deps.py            # Dependencies

@@ -216,37 +216,32 @@ def verify_token_hash(token: str, hashed_token: str) -> bool:
     """
     return hash_token(token) == hashed_token
 
+def validate_password_strength(password: str) -> bool:
     """
     Validate password strength.
+    
+    Requirements:
+    - At least 8 characters long
+    - Contains at least one uppercase letter
+    - Contains at least one lowercase letter
+    - Contains at least one number
+    - Contains at least one special character
     
     Args:
         password: Password to validate
         
     Returns:
-        bool: True if password meets strength requirements
+        bool: True if password meets requirements, False otherwise
     """
-    # Password must be at least 8 characters
     if len(password) < 8:
         return False
+        
+    has_upper = any(c.isupper() for c in password)
+    has_lower = any(c.islower() for c in password)
+    has_digit = any(c.isdigit() for c in password)
+    has_special = any(not c.isalnum() for c in password)
     
-    # Password must contain at least one uppercase letter
-    if not any(c.isupper() for c in password):
-        return False
-    
-    # Password must contain at least one lowercase letter
-    if not any(c.islower() for c in password):
-        return False
-    
-    # Password must contain at least one digit
-    if not any(c.isdigit() for c in password):
-        return False
-    
-    # Password must contain at least one special character
-    special_chars = "!@#$%^&*()_+-=[]{}|;:,.<>?/~`"
-    if not any(c in special_chars for c in password):
-        return False
-    
-    return True
+    return all([has_upper, has_lower, has_digit, has_special])
 
 def is_token_expired(expiry_time: datetime) -> bool:
     """

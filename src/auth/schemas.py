@@ -6,7 +6,7 @@ Enhanced to support role-based authentication flow with specific schemas for eac
 from typing import Optional, List
 from pydantic import BaseModel, EmailStr, Field
 from datetime import datetime
-from .models import UserRole, AccountStatus
+from .models import UserRole, AccountStatus, DoctorStatus
 
 class UserBase(BaseModel):
     """
@@ -229,3 +229,49 @@ class AuthError(BaseModel):
     error: str
     message: str
     suggestions: Optional[List[str]] = None
+
+class BootstrapAdminRequest(BaseModel):
+    """
+    Bootstrap Admin Request Schema - Used for initial admin creation
+    
+    Fields:
+    - email: Admin's email address
+    - password: Admin's password
+    - full_name: Admin's full name (optional)
+    """
+    email: EmailStr
+    password: str
+    full_name: Optional[str] = None
+    
+    class Config:
+        """Configuration for Pydantic model"""
+        json_schema_extra = {
+            "example": {
+                "email": "admin@clinic.com",
+                "password": "secure_password123",
+                "full_name": "System Administrator"
+            }
+        }
+
+class StaffActivation(BaseModel):
+    """
+    Staff Activation Schema - Used for staff account activation
+    
+    Fields:
+    - staff_id: ID of staff to activate
+    - new_password: New password to set
+    - confirm_password: Password confirmation
+    """
+    staff_id: int
+    new_password: str = Field(..., min_length=8)
+    confirm_password: str = Field(..., min_length=8)
+    
+    class Config:
+        """Configuration for Pydantic model"""
+        schema_extra = {
+            "example": {
+                "staff_id": 1,
+                "new_password": "newSecurePassword123",
+                "confirm_password": "newSecurePassword123"
+            }
+        }

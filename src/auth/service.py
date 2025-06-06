@@ -245,7 +245,7 @@ async def login_user(
         
         message = status_messages.get(user.account_status, "Account access denied")
         
-        raise AccountStatusException(user.account_status.value, message)
+        raise AccountStatusException(user.account_status, message)
     
     # Generate access token
     token_data = {
@@ -593,3 +593,70 @@ async def refresh_token(
         "user": UserResponse.from_orm(user),
         "permissions": []  # Permissions will be added by the token creation function
     }
+
+async def create_bootstrap_admin(
+    db: Session,
+    email: str,
+    password: str,
+    full_name: str = "System Administrator"
+) -> Dict[str, Any]:
+    """
+    Create the first admin account from environment variables.
+    This is a one-time process that runs during system initialization.
+    
+    Args:
+        db: Database session
+        email: Admin email from environment
+        password: Admin password from environment
+        full_name: Admin full name (defaults to "System Administrator")
+        
+    Returns:
+        Dict with creation success message
+        
+    Raises:
+        HTTPException: If bootstrap admin already exists or creation fails
+    """
+    logger.info("Attempting to create bootstrap admin account")
+    
+    # Check if any admin exists
+    existing_admin = db.query(User).filter(User.role == UserRole.ADMIN).first()
+    if existing_admin:
+        logger.warning("Bootstrap admin creation failed: Admin already exists")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Bootstrap admin already exists"
+        )
+    
+    try:
+        # Create bootstrap admin with full privileges
+        admin = User(
+            email=email,
+            full_name=full_name,
+            password_hash=hash_password(password),
+            role=UserRole.ADMIN,
+            account_status=AccountStatus.ACTIVE,
+            is_verified=True,
+            created_by=None,  # System-created account
+            verification_code=None  # No verification needed for bootstrap admin
+        )
+        
+        db.add(admin)
+        db.commit()
+        db.refresh(admin)
+        
+        logger.info(f"Bootstrap admin created successfully: {admin.id}")
+        
+        return {
+            "message": "Bootstrap admin created successfully",
+            "admin_id": admin.id,
+            "email": admin.email,
+            "status": "active",
+            "created_at": admin.created_at.isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error creating bootstrap admin: {str(e)}")
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create bootstrap admin"
+        )

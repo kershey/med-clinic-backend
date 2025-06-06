@@ -2,6 +2,8 @@
 Authentication-specific exceptions.
 """
 from fastapi import HTTPException, status
+from typing import Union
+from .models import AccountStatus
 
 class AuthException(HTTPException):
     """Base class for authentication exceptions."""
@@ -25,8 +27,9 @@ class VerificationCodeInvalidException(AuthException):
 
 class AccountStatusException(AuthException):
     """Exception raised when account status prevents an operation."""
-    def __init__(self, status: str, detail: str = None):
-        message = detail or f"Account status '{status}' prevents this operation"
+    def __init__(self, account_status: Union[str, AccountStatus], detail: str = None):
+        status_value = account_status.value if hasattr(account_status, 'value') else str(account_status)
+        message = detail or f"Account status '{status_value}' prevents this operation"
         super().__init__(status_code=status.HTTP_403_FORBIDDEN, detail=message)
 
 class TokenExpiredException(AuthException):

@@ -3,10 +3,11 @@ User Model - Stores all user information in the system with enhanced role-based 
 
 This model supports the complete role-based authentication flow with account status management.
 """
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum
-from sqlalchemy.sql import func
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum, func
+from sqlalchemy.orm import relationship
 import enum
 from ..database import Base
+from datetime import datetime, timezone
 
 class UserRole(str, enum.Enum):
     """
@@ -41,6 +42,21 @@ class AccountStatus(str, enum.Enum):
     ACTIVE = "ACTIVE"
     DEACTIVATED = "DEACTIVATED"
     RED_TAG = "RED_TAG"
+
+class DoctorStatus(str, enum.Enum):
+    """
+    Enumeration for doctor availability status.
+    
+    Status Types:
+    - AVAILABLE: Doctor is available for appointments
+    - UNAVAILABLE: Doctor is not available for appointments
+    - ON_LEAVE: Doctor is on leave
+    - ON_CALL: Doctor is available for emergency calls only
+    """
+    AVAILABLE = "AVAILABLE"
+    UNAVAILABLE = "UNAVAILABLE"
+    ON_LEAVE = "ON_LEAVE"
+    ON_CALL = "ON_CALL"
 
 class User(Base):
     """

@@ -28,11 +28,13 @@ class UserCreate(UserBase):
     - gender: User's gender (optional)
     - address: User's address (optional)
     - contact: User's contact number (optional)
+    - profile_image: URL to user's profile image (optional, provided by Uploadcare)
     """
     password: str
     gender: Optional[str] = None
     address: Optional[str] = None
     contact: Optional[str] = None
+    profile_image: Optional[str] = None
 
 # Role-specific registration schemas
 class PatientRegistration(UserCreate):
@@ -275,3 +277,14 @@ class StaffActivation(BaseModel):
                 "confirm_password": "newSecurePassword123"
             }
         }
+
+class DoctorApprovalRequest(BaseModel):
+    """
+    Doctor Approval Request Schema - Used when approving doctor registrations
+    
+    Fields:
+    - is_approved: Whether to approve or reject the doctor
+    - reason: Reason for approval/rejection decision
+    """
+    is_approved: bool = Field(..., description="Whether to approve or reject the doctor")
+    reason: str = Field(..., description="Reason for approval/rejection decision")

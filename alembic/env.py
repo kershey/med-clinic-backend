@@ -7,12 +7,24 @@ from alembic import context
 
 import sys
 import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.auth.models import Base
+
+# Import all models to ensure they are registered with Base.metadata
+from src.auth.models import Base, User, UserRole, AccountStatus, DoctorStatus
+from src.doctors.models import Doctor
+from src.config import settings
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
+
+# Override sqlalchemy.url with environment variable
+config.set_main_option("sqlalchemy.url", settings.database_url)
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.

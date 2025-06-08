@@ -117,6 +117,10 @@ class User(Base):
     reset_locked_until = Column(DateTime(timezone=True), nullable=True)
     password_changed_at = Column(DateTime(timezone=True), nullable=True)
 
+    # Relationships
+    doctor_profile = relationship("Doctor", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    patient_profile = relationship("Patient", back_populates="user", uselist=False, cascade="all, delete-orphan")
+
     @property
     def account_status(self):
         """Backward compatibility property for account_status."""

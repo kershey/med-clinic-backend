@@ -14,6 +14,7 @@ import os
 from datetime import datetime, timezone
 import random
 import string
+from pydantic import EmailStr
 
 from ..database import get_db
 from .models import User, UserRole, AccountStatus, DoctorStatus
@@ -21,7 +22,7 @@ from .schemas import (
     PatientRegistration, DoctorRegistration, StaffRegistration, AdminRegistration,
     UserLogin, UserVerify, ResendVerification, UserResponse, LoginResponse, AuthError,
     AccountStatusUpdate, PasswordReset, PasswordChange, AdminApprovalRequest, AdminRejectionRequest,
-    BootstrapAdminRequest, StaffActivation
+    BootstrapAdminRequest, StaffActivation, DoctorApprovalRequest
 )
 from .dependencies import (
     get_current_user, get_current_active_user, require_staff_or_admin, require_admin,
@@ -136,8 +137,8 @@ async def bootstrap_admin_route(
 
 @router.post("/register/patient", status_code=status.HTTP_201_CREATED)
 async def register_patient_route(
+    background_tasks: BackgroundTasks,
     patient_data: PatientRegistration,
-    background_tasks: BackgroundTasks, 
     db: Session = Depends(get_db)
 ):
     """
@@ -148,8 +149,8 @@ async def register_patient_route(
     then automatically becomes ACTIVE.
     
     Args:
-        patient_data: Patient registration data
         background_tasks: FastAPI BackgroundTasks for email sending
+        patient_data: Patient registration data (email, full_name, password, gender, address, contact, profile_image)
         db: Database session
         
     Returns:
@@ -167,6 +168,7 @@ async def register_patient_route(
             gender=patient_data.gender,
             address=patient_data.address,
             contact=patient_data.contact,
+            profile_image=patient_data.profile_image,
             background_tasks=background_tasks
         )
         return result
@@ -194,7 +196,7 @@ async def register_doctor_route(
     They cannot access the system until an admin activates their account.
     
     Args:
-        doctor_data: Doctor registration data including professional information
+        doctor_data: Doctor registration data (email, full_name, password, specialization, bio, gender, address, contact, profile_image)
         db: Database session
         
     Returns:
@@ -213,7 +215,8 @@ async def register_doctor_route(
             bio=doctor_data.bio,
             gender=doctor_data.gender,
             address=doctor_data.address,
-            contact=doctor_data.contact
+            contact=doctor_data.contact,
+            profile_image=doctor_data.profile_image
         )
         return result
     except EmailAlreadyExistsException as e:
@@ -221,7 +224,6 @@ async def register_doctor_route(
             status_code=e.status_code,
             detail=e.detail
         )
-
     except Exception as e:
         logger.error(f"Unexpected error during doctor registration: {str(e)}")
         raise HTTPException(
@@ -558,8 +560,8 @@ async def oauth2_token(
 
 @router.post("/register/staff", status_code=status.HTTP_201_CREATED, response_model=Dict)
 async def register_staff_route(
-    staff_data: StaffRegistration,
     background_tasks: BackgroundTasks,
+    staff_data: StaffRegistration,
     current_admin: User = Depends(require_staff_or_admin),
     db: Session = Depends(get_db)
 ):
@@ -571,8 +573,8 @@ async def register_staff_route(
     An email notification is sent to the staff member with activation instructions.
     
     Args:
-        staff_data: Staff registration data
         background_tasks: FastAPI BackgroundTasks for email sending
+        staff_data: Staff registration data (email, full_name, password, gender, address, contact, profile_image)
         current_admin: Current admin user creating the staff account
         db: Database session
         
@@ -594,44 +596,19 @@ async def register_staff_route(
         # Generate a secure temporary password
         temp_password = ''.join(random.choices(string.ascii_letters + string.digits, k=12))
         
-        # Create new staff user
-        user_obj = User(
+        result = await register_staff(
+            db=db,
             email=staff_data.email,
             full_name=staff_data.full_name,
+            password=temp_password,  # Use temporary password
             gender=staff_data.gender,
             address=staff_data.address,
             contact=staff_data.contact,
-            password_hash=hash_password(temp_password),  # Use temporary password
-            role=UserRole.STAFF,
-            account_status=AccountStatus.PENDING_ACTIVATION,
-            is_verified=True,
-            created_by=current_admin.id,
-            created_at=datetime.now(timezone.utc)
+            profile_image=staff_data.profile_image,
+            created_by_id=current_admin.id,
+            background_tasks=background_tasks
         )
-        
-        # Save to database
-        db.add(user_obj)
-        db.commit()
-        db.refresh(user_obj)
-        
-        # Send activation email in background
-        background_tasks.add_task(
-            send_staff_activation_email,
-            email=staff_data.email,
-            full_name=staff_data.full_name,
-            temp_password=temp_password
-        )
-        
-        logger.info(f"Staff account created for {staff_data.email} by admin {current_admin.email}")
-        
-        return {
-            "message": "Staff account created successfully. Activation email has been sent.",
-            "user_id": user_obj.id,
-            "email": staff_data.email,
-            "status": "pending_activation",
-            "created_by": current_admin.email,
-            "created_at": user_obj.created_at.isoformat()
-        }
+        return result
     except HTTPException as e:
         raise e
     except Exception as e:
@@ -689,8 +666,8 @@ async def send_staff_activation_email(email: str, full_name: str, temp_password:
 
 @router.post("/register/admin", status_code=status.HTTP_201_CREATED, response_model=Dict)
 async def register_admin_route(
-    admin_data: AdminRegistration,
     background_tasks: BackgroundTasks,
+    admin_data: AdminRegistration,
     db: Session = Depends(get_db)
 ):
     """
@@ -700,8 +677,8 @@ async def register_admin_route(
     They cannot access the system until an existing admin activates their account.
     
     Args:
-        admin_data: Admin registration data including justification
         background_tasks: FastAPI BackgroundTasks for email sending
+        admin_data: Admin registration data (email, full_name, password, justification, gender, address, contact, profile_image, admin_level)
         db: Database session
         
     Returns:
@@ -716,34 +693,20 @@ async def register_admin_route(
         if existing_user:
             raise EmailAlreadyExistsException()
         
-        # Create new admin user with DISABLED status
-        user_obj = User(
+        result = await register_admin(
+            db=db,
             email=admin_data.email,
             full_name=admin_data.full_name,
+            password=admin_data.password,
             gender=admin_data.gender,
             address=admin_data.address,
             contact=admin_data.contact,
-            password_hash=hash_password(admin_data.password),
-            role=UserRole.ADMIN,
-            account_status=AccountStatus.DISABLED,
-            is_verified=True,
-            created_by=None
+            profile_image=admin_data.profile_image,
+            admin_level=admin_data.admin_level,
+            justification=admin_data.justification,
+            background_tasks=background_tasks
         )
-        
-        # Save to database
-        db.add(user_obj)
-        db.commit()
-        db.refresh(user_obj)
-        
-        return {
-            "message": "Admin account created successfully. Your account is pending administrator approval.",
-            "user_id": user_obj.id,
-            "email": admin_data.email,
-            "admin_level": admin_data.admin_level,
-            "status": "pending_approval",
-            "next_step": "wait_for_admin_approval",
-            "justification": admin_data.justification
-        }
+        return result
     except EmailAlreadyExistsException as e:
         raise HTTPException(
             status_code=e.status_code,
@@ -1208,4 +1171,97 @@ async def activate_staff_account(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to activate staff account"
+        )
+
+@router.post("/doctors/{doctor_id}/approve", status_code=status.HTTP_200_OK)
+async def approve_doctor_registration_route(
+    doctor_id: int,
+    approval_data: DoctorApprovalRequest,
+    current_admin: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Approve or reject a doctor registration.
+    
+    This endpoint allows admins to approve or reject doctor registrations.
+    When approved, the doctor's account status changes to 'Active' and they can
+    access the doctor portal to complete their profile.
+    
+    Args:
+        doctor_id: ID of doctor user to approve
+        approval_data: Doctor approval request data
+        current_admin: Current admin user performing the approval
+        db: Database session
+        
+    Returns:
+        Dict with approval success message and audit details
+        
+    Raises:
+        HTTPException: If doctor not found, invalid status, or insufficient permissions
+    """
+    try:
+        # Find target doctor user
+        target_doctor = db.query(User).filter(
+            User.id == doctor_id,
+            User.role == UserRole.DOCTOR
+        ).first()
+        
+        if not target_doctor:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Doctor user not found"
+            )
+        
+        # Validate current status
+        if target_doctor.account_status != AccountStatus.DISABLED:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot approve doctor with status: {target_doctor.account_status.value}"
+            )
+        
+        # Update doctor status
+        old_status = target_doctor.account_status
+        current_time = datetime.now(timezone.utc)
+        
+        if approval_data.is_approved:
+            target_doctor.account_status = AccountStatus.ACTIVE
+            target_doctor.doctor_status = DoctorStatus.AVAILABLE
+        else:
+            target_doctor.account_status = AccountStatus.DEACTIVATED
+        
+        target_doctor.created_by = current_admin.id
+        target_doctor.updated_at = current_time
+        
+        db.commit()
+        db.refresh(target_doctor)
+        
+        return {
+            "message": "Doctor registration processed successfully",
+            "doctor": {
+                "id": target_doctor.id,
+                "email": target_doctor.email,
+                "full_name": target_doctor.full_name,
+                "previous_status": old_status.value,
+                "current_status": target_doctor.account_status.value,
+                "processed_at": current_time.isoformat()
+            },
+            "approval_details": {
+                "approved_by": {
+                    "id": current_admin.id,
+                    "email": current_admin.email,
+                    "full_name": current_admin.full_name
+                },
+                "is_approved": approval_data.is_approved,
+                "reason": approval_data.reason,
+                "timestamp": current_time.isoformat()
+            }
+        }
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error processing doctor registration: {str(e)}")
+        db.rollback()  # Rollback the transaction on error
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while processing doctor registration"
         )

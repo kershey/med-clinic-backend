@@ -63,3 +63,8 @@ class RoleDeniedException(AuthException):
     def __init__(self, required_roles: list, user_role: str):
         detail = f"Access denied. Required roles: {required_roles}. Your role: {user_role}"
         super().__init__(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+class ResourceNotFoundException(AuthException):
+    """Exception raised when a requested resource is not found."""
+    def __init__(self, detail: str = "Resource not found"):
+        super().__init__(status_code=status.HTTP_404_NOT_FOUND, detail=detail)

@@ -24,7 +24,8 @@ from .utils import (
     generate_verification_code,
     send_verification_email,
     send_password_reset_email,
-    send_password_changed_notification
+    send_password_changed_notification,
+    send_staff_activation_email
 )
 from .exceptions import (
     InvalidCredentialsException,
@@ -49,6 +50,7 @@ async def register_patient(
     gender: Optional[str] = None,
     address: Optional[str] = None,
     contact: Optional[str] = None,
+    profile_image: Optional[str] = None,
     background_tasks: Optional[BackgroundTasks] = None
 ) -> Dict[str, Any]:
     """
@@ -62,6 +64,7 @@ async def register_patient(
         gender: User's gender (optional)
         address: User's address (optional)
         contact: User's contact number (optional)
+        profile_image: URL to user's profile image (optional, provided by Uploadcare)
         background_tasks: FastAPI BackgroundTasks for email sending
         
     Returns:
@@ -92,7 +95,8 @@ async def register_patient(
         role=UserRole.PATIENT,
         account_status=AccountStatus.PENDING_VERIFICATION,
         verification_code=verification_code,
-        is_verified=False
+        is_verified=False,
+        profile_image=profile_image
     )
     
     # Save to database
@@ -144,7 +148,8 @@ async def register_doctor(
     bio: Optional[str] = None,
     gender: Optional[str] = None,
     address: Optional[str] = None,
-    contact: Optional[str] = None
+    contact: Optional[str] = None,
+    profile_image: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Register a new doctor user.
@@ -159,6 +164,7 @@ async def register_doctor(
         gender: Doctor's gender (optional)
         address: Doctor's address (optional)
         contact: Doctor's contact number (optional)
+        profile_image: URL to doctor's profile image (optional, provided by Uploadcare)
         
     Returns:
         Dict with registration success message and approval instructions
@@ -174,7 +180,6 @@ async def register_doctor(
         logger.warning(f"Registration failed: Email {email} already registered")
         raise EmailAlreadyExistsException()
     
-    
     # Create new doctor user with DISABLED status
     user_obj = User(
         email=email,
@@ -185,7 +190,8 @@ async def register_doctor(
         password_hash=hash_password(password),
         role=UserRole.DOCTOR,
         account_status=AccountStatus.DISABLED,
-        is_verified=True  # Doctors don't need email verification, just admin approval
+        is_verified=True,  # Doctors don't need email verification, just admin approval
+        profile_image=profile_image
     )
     
     # Save to database
@@ -201,6 +207,87 @@ async def register_doctor(
         "user_id": user_obj.id,
         "email": email,
         "status": "pending_approval",
+    }
+
+async def register_staff(
+    db: Session,
+    email: EmailStr,
+    full_name: str,
+    password: str,
+    gender: Optional[str] = None,
+    address: Optional[str] = None,
+    contact: Optional[str] = None,
+    profile_image: Optional[str] = None,
+    created_by_id: Optional[int] = None,
+    background_tasks: Optional[BackgroundTasks] = None
+) -> Dict[str, Any]:
+    """
+    Register a new staff user.
+    
+    Args:
+        db: Database session
+        email: Staff's email address
+        full_name: Staff's full name
+        password: Staff's password (temporary for initial creation)
+        gender: Staff's gender (optional)
+        address: Staff's address (optional)
+        contact: Staff's contact number (optional)
+        profile_image: URL to staff's profile image (optional, provided by Uploadcare)
+        created_by_id: ID of the admin/staff who created this account (optional)
+        background_tasks: FastAPI BackgroundTasks for email sending
+        
+    Returns:
+        Dict with account creation success message
+        
+    Raises:
+        EmailAlreadyExistsException: If email already exists
+    """
+    logger.info(f"Staff registration attempt for email: {email}")
+    
+    # Check if email already exists
+    existing_user = db.query(User).filter(User.email == email).first()
+    if existing_user:
+        logger.warning(f"Registration failed: Email {email} already registered")
+        raise EmailAlreadyExistsException()
+    
+    # Create new staff user
+    user_obj = User(
+        email=email,
+        full_name=full_name,
+        gender=gender,
+        address=address,
+        contact=contact,
+        password_hash=hash_password(password),
+        role=UserRole.STAFF,
+        account_status=AccountStatus.PENDING_ACTIVATION,
+        is_verified=True,
+        created_by=created_by_id,
+        created_at=datetime.now(timezone.utc),
+        profile_image=profile_image
+    )
+    
+    # Save to database
+    db.add(user_obj)
+    db.commit()
+    db.refresh(user_obj)
+    logger.info(f"Staff account created: {user_obj.id}")
+    
+    # Send activation email in background
+    if background_tasks:
+        background_tasks.add_task(
+            send_staff_activation_email,
+            email=email,
+            full_name=full_name,
+            temp_password=password
+        )
+    
+    return {
+        "message": "Staff account created successfully. Activation email has been sent.",
+        "user_id": user_obj.id,
+        "email": email,
+        "status": "pending_activation",
+        "created_by": created_by_id,
+        "created_at": user_obj.created_at.isoformat()
     }
 
 async def login_user(
@@ -660,3 +747,77 @@ async def create_bootstrap_admin(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create bootstrap admin"
         )
+
+async def register_admin(
+    db: Session,
+    email: EmailStr,
+    full_name: str,
+    password: str,
+    gender: Optional[str] = None,
+    address: Optional[str] = None,
+    contact: Optional[str] = None,
+    profile_image: Optional[str] = None,
+    admin_level: int = 1,
+    justification: str = "Admin registration request",
+    background_tasks: Optional[BackgroundTasks] = None
+) -> Dict[str, Any]:
+    """
+    Register a new admin user.
+    
+    Args:
+        db: Database session
+        email: Admin's email address
+        full_name: Admin's full name
+        password: Admin's password
+        gender: Admin's gender (optional)
+        address: Admin's address (optional)
+        contact: Admin's contact number (optional)
+        profile_image: URL to admin's profile image (optional, provided by Uploadcare)
+        admin_level: Level of admin access (1-5, where 5 is highest)
+        justification: Reason for requesting admin access
+        background_tasks: FastAPI BackgroundTasks for email sending (currently unused but kept for consistency)
+        
+    Returns:
+        Dict with registration success message and approval instructions
+        
+    Raises:
+        EmailAlreadyExistsException: If email already exists
+    """
+    logger.info(f"Admin registration attempt for email: {email}")
+    
+    # Check if email already exists
+    existing_user = db.query(User).filter(User.email == email).first()
+    if existing_user:
+        logger.warning(f"Registration failed: Email {email} already registered")
+        raise EmailAlreadyExistsException()
+    
+    # Create new admin user with DISABLED status
+    user_obj = User(
+        email=email,
+        full_name=full_name,
+        gender=gender,
+        address=address,
+        contact=contact,
+        password_hash=hash_password(password),
+        role=UserRole.ADMIN,
+        account_status=AccountStatus.DISABLED,
+        is_verified=True,
+        created_by=None, # Admins are not created by another user initially
+        profile_image=profile_image
+    )
+    
+    # Save to database
+    db.add(user_obj)
+    db.commit()
+    db.refresh(user_obj)
+    logger.info(f"Admin account created (pending approval): {user_obj.id}")
+    
+    return {
+        "message": "Admin account created successfully. Your account is pending administrator approval.",
+        "user_id": user_obj.id,
+        "email": email,
+        "admin_level": admin_level,
+        "status": "pending_approval",
+        "next_step": "wait_for_admin_approval",
+        "justification": justification
+    }

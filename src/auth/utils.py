@@ -415,3 +415,145 @@ async def send_password_changed_notification(email: EmailStr, full_name: str) ->
     error_msg = f"Failed to send password changed notification after {MAX_RETRIES} attempts"
     logger.error(error_msg)
     raise Exception(error_msg)
+
+async def send_staff_activation_email(email: EmailStr, full_name: str, temp_password: str) -> None:
+    """
+    Sends an activation email to a new staff member with their temporary password.
+    
+    Args:
+        email: Staff member's email address
+        full_name: Staff member's full name for personalization
+        temp_password: Temporary password generated for the staff member
+        
+    Returns:
+        None
+        
+    Raises:
+        Exception: If email sending fails after all retries
+    """
+    if not validate_email_config():
+        raise Exception("Email configuration is incomplete")
+    
+    logger.info(f"Attempting to send staff activation email to {email}")
+    
+    # Create HTML body for staff activation email
+    html_content = f"""
+    <html>
+        <head>
+            <title>Medical Clinic - Staff Account Activation</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; line-height: 1.6; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                .header {{ background-color: #5cb85c; color: white; padding: 10px; text-align: center; }}
+                .content {{ padding: 20px; border: 1px solid #ddd; }}
+                .credentials {{ background-color: #f5f5f5; padding: 15px; border-left: 5px solid #5cb85c; margin: 20px 0; }}
+                .footer {{ text-align: center; margin-top: 20px; font-size: 12px; color: #777; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>Medical Clinic</h1>
+                </div>
+                <div class="content">
+                    <p>Hello {full_name},</p>
+                    <p>Your staff account for Medical Clinic has been created. You can log in using the following temporary credentials:</p>
+                    <div class="credentials">
+                        <p><strong>Email:</strong> {email}</p>
+                        <p><strong>Temporary Password:</strong> {temp_password}</p>
+                    </div>
+                    <p>For security reasons, we highly recommend that you change your password immediately after your first login.</p>
+                    <p>If you have any questions or encounter issues, please contact your administrator.</p>
+                    <p>Best regards,<br>Medical Clinic Team</p>
+                </div>
+                <div class="footer">
+                    &copy; {datetime.now().year} Medical Clinic. All rights reserved.
+                </div>
+            </div>
+        </body>
+    </html>
+    """
+    
+    # Create multipart message
+    msg = MIMEMultipart()
+    msg["From"] = settings.mail_from
+    msg["To"] = email
+    msg["Subject"] = "Medical Clinic - Your Staff Account Activation"
+    
+    # Attach HTML content
+    msg.attach(MIMEText(html_content, "html"))
+    
+    # Retry logic for email sending
+    last_exception = None
+    
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            logger.info(f"Email send attempt {attempt}/{MAX_RETRIES} to {email}")
+            
+            # Create SMTP session with timeout
+            logger.info(f"Connecting to SMTP server {settings.mail_server}:{settings.mail_port}...")
+            
+            # Create a secure SSL context that works on macOS
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            
+            # Set socket timeout
+            socket.setdefaulttimeout(SMTP_TIMEOUT)
+            
+            with smtplib.SMTP(settings.mail_server, settings.mail_port, timeout=SMTP_TIMEOUT) as server:
+                # Enable debug output for troubleshooting
+                server.set_debuglevel(0)
+                
+                server.ehlo()
+                logger.info("Starting TLS...")
+                server.starttls(context=context)
+                server.ehlo()
+                
+                # Login to server
+                logger.info(f"Logging in with username: {settings.mail_username}")
+                server.login(settings.mail_username, settings.mail_password)
+                
+                # Send email
+                logger.info(f"Sending email to {email}...")
+                server.send_message(msg)
+                
+            logger.info(f"Email sent successfully to {email} on attempt {attempt}")
+            return  # Success, exit function
+            
+        except smtplib.SMTPAuthenticationError as e:
+            logger.error(f"SMTP Authentication failed on attempt {attempt}: {str(e)}")
+            logger.error("Check your email App Password. You may need to generate a new one.")
+            last_exception = e
+            break
+            
+        except smtplib.SMTPRecipientsRefused as e:
+            logger.error(f"SMTP Recipients refused on attempt {attempt}: {str(e)}")
+            last_exception = e
+            break
+            
+        except smtplib.SMTPServerDisconnected as e:
+            logger.warning(f"SMTP server disconnected on attempt {attempt}: {str(e)}")
+            last_exception = e
+            if attempt < MAX_RETRIES:
+                logger.info(f"Retrying in {RETRY_DELAY} seconds...")
+                time.sleep(RETRY_DELAY)
+                
+        except (smtplib.SMTPConnectError, socket.timeout, socket.gaierror) as e:
+            logger.warning(f"SMTP connection error on attempt {attempt}: {str(e)}")
+            last_exception = e
+            if attempt < MAX_RETRIES:
+                logger.info(f"Retrying in {RETRY_DELAY} seconds...")
+                time.sleep(RETRY_DELAY)
+                
+        except Exception as e:
+            logger.error(f"Unexpected error on attempt {attempt}: {str(e)}")
+            last_exception = e
+            if attempt < MAX_RETRIES:
+                logger.info(f"Retrying in {RETRY_DELAY} seconds...")
+                time.sleep(RETRY_DELAY)
+    
+    # All retries failed
+    error_msg = f"Failed to send email after {MAX_RETRIES} attempts. Last error: {str(last_exception)}"
+    logger.error(error_msg)
+    raise Exception(error_msg)

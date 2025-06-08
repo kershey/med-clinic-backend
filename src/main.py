@@ -14,10 +14,14 @@ from .auth.router import router as auth_router
 # These will be uncommented as they are implemented
 # from .appointments.router import router as appointments_router
 # from .patients.router import router as patients_router
-# from .doctors.router import router as doctors_router
+from .doctors.router import router as doctors_router
 from .database import engine, get_db
 from .config import settings
 from .auth.models import Base  # Import all models here for creating tables
+from .doctors.models import Doctor  # Import Doctor model
+from .patients.models import Patient  # Import Patient model
+from .appointments.models import Appointment  # Import Appointment model
+from .medical_records.models import MedicalRecord  # Import MedicalRecord model
 from .exceptions import register_exception_handlers
 from .core.middleware import setup_middlewares
 from .core.bootstrap import bootstrap_admin_if_needed
@@ -70,7 +74,7 @@ app.include_router(auth_router, prefix="/api/v1/auth", tags=["Authentication"])
 # These will be uncommented as they are implemented
 # app.include_router(appointments_router, prefix="/api/v1/appointments", tags=["appointments"])
 # app.include_router(patients_router, prefix="/api/v1/patients", tags=["patients"])
-# app.include_router(doctors_router, prefix="/api/v1/doctors", tags=["doctors"])
+app.include_router(doctors_router, prefix="/api/v1/doctors", tags=["doctors"])
 
 # Root endpoint
 @app.get("/")

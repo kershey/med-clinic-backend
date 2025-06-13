@@ -142,11 +142,20 @@ async def bootstrap_admin_route(
 # ROLE-SPECIFIC REGISTRATION ROUTES
 # ============================================================================
 
+from fastapi import File, Form, UploadFile
+from ..core.cloudinary import upload_profile_image
+
 @router.post("/register/patient", status_code=status.HTTP_201_CREATED, summary="Patient Self-Registration")
 async def register_patient_route(
     background_tasks: BackgroundTasks,
-    patient_data: PatientRegistration,
-    request: Request,
+    email: str = Form(...),
+    full_name: str = Form(...),
+    password: str = Form(...),
+    gender: str = Form(None),
+    address: str = Form(None),
+    contact: str = Form(None),
+    profile_image: UploadFile = File(None),
+    request: Request = None,
     db: Session = Depends(get_db)
 ):
     """
@@ -169,15 +178,22 @@ async def register_patient_route(
         HTTPException: If email already exists or other error occurs
     """
     try:
+        image_url = None
+        if profile_image is not None:
+            if profile_image.content_type not in ["image/jpeg", "image/png", "image/webp"]:
+                raise HTTPException(status_code=400, detail="Invalid image type. Only jpg, png, webp allowed.")
+            if profile_image.size and profile_image.size > 2 * 1024 * 1024:
+                raise HTTPException(status_code=400, detail="Image too large. Max 2MB allowed.")
+            image_url = upload_profile_image(profile_image.file)
         result = await register_patient(
             db=db,
-            email=patient_data.email,
-            full_name=patient_data.full_name,
-            password=patient_data.password,
-            gender=patient_data.gender,
-            address=patient_data.address,
-            contact=patient_data.contact,
-            profile_image=patient_data.profile_image,
+            email=email,
+            full_name=full_name,
+            password=password,
+            gender=gender,
+            address=address,
+            contact=contact,
+            profile_image=image_url,
             background_tasks=background_tasks,
             request=request
         )
@@ -196,8 +212,16 @@ async def register_patient_route(
 
 @router.post("/register/doctor", status_code=status.HTTP_201_CREATED, summary="Doctor Self-Registration (Pending Approval)")
 async def register_doctor_route(
-    doctor_data: DoctorRegistration,
-    request: Request,
+    email: str = Form(...),
+    full_name: str = Form(...),
+    password: str = Form(...),
+    specialization: str = Form(...),
+    bio: str = Form(None),
+    gender: str = Form(None),
+    address: str = Form(None),
+    contact: str = Form(None),
+    profile_image: UploadFile = File(None),
+    request: Request = None,
     db: Session = Depends(get_db)
 ):
     """
@@ -218,17 +242,24 @@ async def register_doctor_route(
         HTTPException: If email already exists or other error occurs
     """
     try:
+        image_url = None
+        if profile_image is not None:
+            if profile_image.content_type not in ["image/jpeg", "image/png", "image/webp"]:
+                raise HTTPException(status_code=400, detail="Invalid image type. Only jpg, png, webp allowed.")
+            if profile_image.size and profile_image.size > 2 * 1024 * 1024:
+                raise HTTPException(status_code=400, detail="Image too large. Max 2MB allowed.")
+            image_url = upload_profile_image(profile_image.file)
         result = await register_doctor(
             db=db,
-            email=doctor_data.email,
-            full_name=doctor_data.full_name,
-            password=doctor_data.password,
-            specialization=doctor_data.specialization,
-            bio=doctor_data.bio,
-            gender=doctor_data.gender,
-            address=doctor_data.address,
-            contact=doctor_data.contact,
-            profile_image=doctor_data.profile_image,
+            email=email,
+            full_name=full_name,
+            password=password,
+            specialization=specialization,
+            bio=bio,
+            gender=gender,
+            address=address,
+            contact=contact,
+            profile_image=image_url,
             request=request
         )
         return result
@@ -612,7 +643,12 @@ async def oauth2_token_route(
 @router.post("/register/staff", status_code=status.HTTP_201_CREATED, response_model=Dict)
 async def register_staff_route(
     background_tasks: BackgroundTasks,
-    staff_data: StaffRegistration,
+    email: str = Form(...),
+    full_name: str = Form(...),
+    gender: str = Form(None),
+    address: str = Form(None),
+    contact: str = Form(None),
+    profile_image: UploadFile = File(None),
     current_admin: User = Depends(require_staff_or_admin),
     db: Session = Depends(get_db)
 ):
@@ -637,25 +673,31 @@ async def register_staff_route(
     """
     try:
         # Check if email already exists
-        existing_user = db.query(User).filter(User.email == staff_data.email).first()
+        existing_user = db.query(User).filter(User.email == email).first()
         if existing_user:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Email already registered"
             )
-        
+        image_url = None
+        if profile_image is not None:
+            if profile_image.content_type not in ["image/jpeg", "image/png", "image/webp"]:
+                raise HTTPException(status_code=400, detail="Invalid image type. Only jpg, png, webp allowed.")
+            if profile_image.size and profile_image.size > 2 * 1024 * 1024:
+                raise HTTPException(status_code=400, detail="Image too large. Max 2MB allowed.")
+            image_url = upload_profile_image(profile_image.file)
         # Generate a secure temporary password
         temp_password = ''.join(random.choices(string.ascii_letters + string.digits, k=12))
         
         result = await register_staff(
             db=db,
-            email=staff_data.email,
-            full_name=staff_data.full_name,
+            email=email,
+            full_name=full_name,
             password=temp_password,  # Use temporary password
-            gender=staff_data.gender,
-            address=staff_data.address,
-            contact=staff_data.contact,
-            profile_image=staff_data.profile_image,
+            gender=gender,
+            address=address,
+            contact=contact,
+            profile_image=image_url,
             created_by_id=current_admin.id,
             background_tasks=background_tasks
         )
@@ -718,8 +760,16 @@ async def send_staff_activation_email(email: str, full_name: str, temp_password:
 @router.post("/register/admin", status_code=status.HTTP_201_CREATED, summary="Admin Self-Registration (Pending Approval)")
 async def register_admin_route(
     background_tasks: BackgroundTasks,
-    admin_data: AdminRegistration,
-    request: Request,
+    email: str = Form(...),
+    full_name: str = Form(...),
+    password: str = Form(...),
+    gender: str = Form(None),
+    address: str = Form(None),
+    contact: str = Form(None),
+    admin_level: int = Form(1),
+    justification: str = Form(...),
+    profile_image: UploadFile = File(None),
+    request: Request = None,
     db: Session = Depends(get_db)
 ):
     """
@@ -742,21 +792,27 @@ async def register_admin_route(
     """
     try:
         # Check if email already exists
-        existing_user = db.query(User).filter(User.email == admin_data.email).first()
+        existing_user = db.query(User).filter(User.email == email).first()
         if existing_user:
             raise EmailAlreadyExistsException()
-        
+        image_url = None
+        if profile_image is not None:
+            if profile_image.content_type not in ["image/jpeg", "image/png", "image/webp"]:
+                raise HTTPException(status_code=400, detail="Invalid image type. Only jpg, png, webp allowed.")
+            if profile_image.size and profile_image.size > 2 * 1024 * 1024:
+                raise HTTPException(status_code=400, detail="Image too large. Max 2MB allowed.")
+            image_url = upload_profile_image(profile_image.file)
         result = await register_admin(
             db=db,
-            email=admin_data.email,
-            full_name=admin_data.full_name,
-            password=admin_data.password,
-            gender=admin_data.gender,
-            address=admin_data.address,
-            contact=admin_data.contact,
-            profile_image=admin_data.profile_image,
-            admin_level=admin_data.admin_level,
-            justification=admin_data.justification,
+            email=email,
+            full_name=full_name,
+            password=password,
+            gender=gender,
+            address=address,
+            contact=contact,
+            profile_image=image_url,
+            admin_level=admin_level,
+            justification=justification,
             background_tasks=background_tasks,
             request=request
         )

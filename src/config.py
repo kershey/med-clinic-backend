@@ -64,5 +64,10 @@ class Settings(BaseSettings):
         env_file = ".env"
         case_sensitive = False
 
+    # Cloudinary settings
+    cloudinary_cloud_name: str
+    cloudinary_api_key: str
+    cloudinary_api_secret: str
+
 # Create settings instance
 settings = Settings()

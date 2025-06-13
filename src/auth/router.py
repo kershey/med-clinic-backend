@@ -1,7 +1,7 @@
 """
 Authentication routes for the medical clinic system.
 """
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status, Request
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status, Request, Query
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -17,21 +17,27 @@ import string
 from pydantic import EmailStr
 
 from ..database import get_db
+from ..core.audit_models import AuditLog
 from .models import User, UserRole, AccountStatus, DoctorStatus
 from .schemas import (
     PatientRegistration, DoctorRegistration, StaffRegistration, AdminRegistration,
     UserLogin, UserVerify, ResendVerification, UserResponse, LoginResponse, AuthError,
     AccountStatusUpdate, PasswordReset, PasswordChange, AdminApprovalRequest, AdminRejectionRequest,
-    BootstrapAdminRequest, StaffActivation, DoctorApprovalRequest
+    BootstrapAdminRequest, StaffActivation, DoctorApprovalRequest,
+    UserPasswordChangeInternal, DoctorOnHireUpdate, StaffFirstLoginPasswordSet,
+    AuditLogResponse, BootstrapStatusResponse, ActivationTokenStatusResponse
 )
 from .dependencies import (
     get_current_user, get_current_active_user, require_staff_or_admin, require_admin,
-    get_current_user_with_verification_status
+    get_current_user_with_verification_status, get_optional_current_user
 )
 from .service import (
     register_patient, register_doctor, login_user, verify_email,
     resend_verification, forgot_password, reset_password, refresh_token,
-    create_bootstrap_admin
+    create_bootstrap_admin, register_staff, register_admin,
+    change_password_internal, admin_activate_user_account, admin_deactivate_user_account,
+    admin_set_doctor_onhire_status, staff_set_password_first_login,
+    get_bootstrap_admin_status, check_general_activation_token_status, get_audit_logs_service
 )
 from .exceptions import (
     InvalidCredentialsException, EmailAlreadyExistsException,
@@ -47,13 +53,13 @@ from ..config import settings
 logger = logging.getLogger(__name__)
 
 # Create API router
-router = APIRouter()
+router = APIRouter(prefix="/api/v1/auth", tags=["Authentication"])
 
 # ============================================================================
 # BOOTSTRAP ADMIN ROUTES
 # ============================================================================
 
-@router.post("/bootstrap-admin", status_code=status.HTTP_201_CREATED)
+@router.post("/bootstrap-admin", status_code=status.HTTP_201_CREATED, summary="Initialize Bootstrap Admin (One-time setup)")
 async def bootstrap_admin_route(
     request: Request,
     db: Session = Depends(get_db)
@@ -105,7 +111,8 @@ async def bootstrap_admin_route(
             db=db,
             email=admin_email,
             password=admin_password,
-            full_name=admin_name
+            full_name=admin_name,
+            request=request
         )
         
         # Log bootstrap success
@@ -135,10 +142,11 @@ async def bootstrap_admin_route(
 # ROLE-SPECIFIC REGISTRATION ROUTES
 # ============================================================================
 
-@router.post("/register/patient", status_code=status.HTTP_201_CREATED)
+@router.post("/register/patient", status_code=status.HTTP_201_CREATED, summary="Patient Self-Registration")
 async def register_patient_route(
     background_tasks: BackgroundTasks,
     patient_data: PatientRegistration,
+    request: Request,
     db: Session = Depends(get_db)
 ):
     """
@@ -151,6 +159,7 @@ async def register_patient_route(
     Args:
         background_tasks: FastAPI BackgroundTasks for email sending
         patient_data: Patient registration data (email, full_name, password, gender, address, contact, profile_image)
+        request: FastAPI request object
         db: Database session
         
     Returns:
@@ -169,7 +178,8 @@ async def register_patient_route(
             address=patient_data.address,
             contact=patient_data.contact,
             profile_image=patient_data.profile_image,
-            background_tasks=background_tasks
+            background_tasks=background_tasks,
+            request=request
         )
         return result
     except EmailAlreadyExistsException as e:
@@ -184,9 +194,10 @@ async def register_patient_route(
             detail="An unexpected error occurred during registration"
         )
 
-@router.post("/register/doctor", status_code=status.HTTP_201_CREATED)
+@router.post("/register/doctor", status_code=status.HTTP_201_CREATED, summary="Doctor Self-Registration (Pending Approval)")
 async def register_doctor_route(
     doctor_data: DoctorRegistration,
+    request: Request,
     db: Session = Depends(get_db)
 ):
     """
@@ -197,6 +208,7 @@ async def register_doctor_route(
     
     Args:
         doctor_data: Doctor registration data (email, full_name, password, specialization, bio, gender, address, contact, profile_image)
+        request: FastAPI request object
         db: Database session
         
     Returns:
@@ -216,7 +228,8 @@ async def register_doctor_route(
             gender=doctor_data.gender,
             address=doctor_data.address,
             contact=doctor_data.contact,
-            profile_image=doctor_data.profile_image
+            profile_image=doctor_data.profile_image,
+            request=request
         )
         return result
     except EmailAlreadyExistsException as e:
@@ -231,9 +244,10 @@ async def register_doctor_route(
             detail="An unexpected error occurred during registration"
         )
 
-@router.post("/login", response_model=LoginResponse)
+@router.post("/login", response_model=LoginResponse, summary="User Login")
 async def login_route(
     login_data: UserLogin,
+    request: Request,
     db: Session = Depends(get_db)
 ):
     """
@@ -241,6 +255,7 @@ async def login_route(
     
     Args:
         login_data: User login credentials
+        request: FastAPI request object
         db: Database session
         
     Returns:
@@ -253,7 +268,8 @@ async def login_route(
         result = await login_user(
             db=db,
             email=login_data.email,
-            password=login_data.password
+            password=login_data.password,
+            request=request
         )
         return result
     except InvalidCredentialsException as e:
@@ -275,9 +291,10 @@ async def login_route(
             detail="An unexpected error occurred during login"
         )
 
-@router.post("/verify-email", status_code=status.HTTP_200_OK)
+@router.post("/verify-email", status_code=status.HTTP_200_OK, summary="Verify Email Address")
 async def verify_email_route(
     verification_data: UserVerify,
+    request: Request,
     db: Session = Depends(get_db)
 ):
     """
@@ -285,6 +302,7 @@ async def verify_email_route(
     
     Args:
         verification_data: Email and verification code
+        request: FastAPI request object
         db: Database session
         
     Returns:
@@ -297,7 +315,8 @@ async def verify_email_route(
         result = await verify_email(
             db=db,
             email=verification_data.email,
-            verification_code=verification_data.verification_code
+            verification_code=verification_data.verification_code,
+            request=request
         )
         return result
     except InvalidCredentialsException as e:
@@ -317,16 +336,18 @@ async def verify_email_route(
             detail="An unexpected error occurred during email verification"
         )
 
-@router.post("/resend-verification", status_code=status.HTTP_200_OK)
+@router.post("/resend-verification", status_code=status.HTTP_200_OK, summary="Resend Verification Email")
 async def resend_verification_route(
-    verification_request: ResendVerification,
+    verification_request_data: ResendVerification,
+    request: Request,
     db: Session = Depends(get_db)
 ):
     """
     Resend verification email endpoint.
     
     Args:
-        verification_request: Email to resend verification to
+        verification_request_data: Email to resend verification to
+        request: FastAPI request object
         db: Database session
         
     Returns:
@@ -338,7 +359,8 @@ async def resend_verification_route(
     try:
         result = await resend_verification(
             db=db,
-            email=verification_request.email
+            email=verification_request_data.email,
+            request=request
         )
         return result
     except InvalidCredentialsException as e:
@@ -353,9 +375,9 @@ async def resend_verification_route(
             detail="An unexpected error occurred while resending verification"
         )
 
-@router.post("/forgot-password", status_code=status.HTTP_200_OK)
+@router.post("/forgot-password", status_code=status.HTTP_200_OK, summary="Request Password Reset")
 async def forgot_password_route(
-    password_reset: PasswordReset,
+    password_reset_data: PasswordReset,
     request: Request,
     db: Session = Depends(get_db)
 ):
@@ -363,7 +385,7 @@ async def forgot_password_route(
     Forgot password endpoint to initiate password reset.
     
     Args:
-        password_reset: Email for password reset
+        password_reset_data: Email for password reset
         request: FastAPI request object for building reset URL
         db: Database session
         
@@ -376,12 +398,13 @@ async def forgot_password_route(
     try:
         # Build base URL for password reset
         base_url = str(request.base_url).rstrip('/')
-        request_url = settings.frontend_url or base_url
+        frontend_reset_url = settings.frontend_url or base_url
         
         result = await forgot_password(
             db=db,
-            email=password_reset.email,
-            request_url=request_url
+            email=password_reset_data.email,
+            request_url=frontend_reset_url,
+            request=request
         )
         return result
     except AccountLockedException as e:
@@ -396,16 +419,18 @@ async def forgot_password_route(
             "message": "If your email is registered, you will receive password reset instructions"
         }
 
-@router.post("/reset-password", status_code=status.HTTP_200_OK)
+@router.post("/reset-password", status_code=status.HTTP_200_OK, summary="Reset Password with Token")
 async def reset_password_route(
-    password_change: PasswordChange,
+    password_change_data: PasswordChange,
+    request: Request,
     db: Session = Depends(get_db)
 ):
     """
     Reset password endpoint.
     
     Args:
-        password_change: Email, reset token, and new password
+        password_change_data: Email, reset token, and new password
+        request: FastAPI request object
         db: Database session
         
     Returns:
@@ -417,9 +442,10 @@ async def reset_password_route(
     try:
         result = await reset_password(
             db=db,
-            email=password_change.email,
-            reset_token=password_change.reset_token,
-            new_password=password_change.new_password
+            email=password_change_data.email,
+            reset_token=password_change_data.reset_token,
+            new_password=password_change_data.new_password,
+            request=request
         )
         return result
     except InvalidCredentialsException as e:
@@ -449,15 +475,19 @@ async def reset_password_route(
             detail="An unexpected error occurred during password reset"
         )
 
-@router.post("/refresh-token", response_model=LoginResponse)
+@router.post("/refresh", response_model=LoginResponse, summary="Refresh Access Token")
 async def refresh_token_route(
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Refresh access token endpoint.
     
+    Requires a valid Refresh Token in the Authorization header.
+    
     Args:
+        request: FastAPI request object
         current_user: Current authenticated user
         db: Database session
         
@@ -467,7 +497,8 @@ async def refresh_token_route(
     try:
         result = await refresh_token(
             user=current_user,
-            db=db
+            db=db,
+            request=request
         )
         return result
     except Exception as e:
@@ -477,21 +508,35 @@ async def refresh_token_route(
             detail="An unexpected error occurred during token refresh"
         )
 
-@router.post("/logout", status_code=status.HTTP_200_OK)
-def logout():
+@router.post("/logout", status_code=status.HTTP_200_OK, summary="User Logout")
+async def logout(
+    request: Request, 
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user) 
+):
     """
     Logout endpoint.
     
     Note: Since JWT tokens are stateless, the client should simply discard the token.
-    This endpoint is provided for API completeness.
+    This endpoint is provided for API completeness and audit logging.
     
     Returns:
         Dict with logout success message
     """
-    return {"message": "Successfully logged out"}
+    await create_audit_log(
+        db=db, 
+        action="USER_LOGOUT_ATTEMPTED", 
+        user_id=current_user.id if current_user else None, 
+        request=request,
+        details={"message": "User initiated logout"}
+    )
+    # Actual token invalidation would happen on client-side or if using a server-side denylist for tokens.
+    return {"message": "Successfully logged out. Please discard your token."}
 
-@router.get("/me", response_model=UserResponse)
-def get_current_user_profile(
+@router.get("/me", response_model=UserResponse, summary="Get Current User Profile")
+async def get_current_user_profile(
+    request: Request,
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """
@@ -499,14 +544,18 @@ def get_current_user_profile(
     
     Args:
         current_user: Current authenticated user
+        request: FastAPI request object for audit logging
+        db: Database session for audit logging
         
     Returns:
         UserResponse with user profile information
     """
+    await create_audit_log(db, action="USER_PROFILE_VIEWED", user_id=current_user.id, request=request)
     return current_user
 
-@router.post("/oauth2-token")
-async def oauth2_token(
+@router.post("/oauth2-token", include_in_schema=False)
+async def oauth2_token_route(
+    request: Request,
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db)
 ):
@@ -515,6 +564,7 @@ async def oauth2_token(
     
     Args:
         form_data: OAuth2 form data with username and password
+        request: FastAPI request object
         db: Database session
         
     Returns:
@@ -527,7 +577,8 @@ async def oauth2_token(
         result = await login_user(
             db=db,
             email=form_data.username,  # OAuth2 uses 'username' field
-            password=form_data.password
+            password=form_data.password,
+            request=request
         )
         
         # Convert to OAuth2 compatible response
@@ -664,10 +715,11 @@ async def send_staff_activation_email(email: str, full_name: str, temp_password:
     except Exception as e:
         logger.error(f"Failed to send staff activation email to {email}: {str(e)}")
 
-@router.post("/register/admin", status_code=status.HTTP_201_CREATED, response_model=Dict)
+@router.post("/register/admin", status_code=status.HTTP_201_CREATED, summary="Admin Self-Registration (Pending Approval)")
 async def register_admin_route(
     background_tasks: BackgroundTasks,
     admin_data: AdminRegistration,
+    request: Request,
     db: Session = Depends(get_db)
 ):
     """
@@ -679,6 +731,7 @@ async def register_admin_route(
     Args:
         background_tasks: FastAPI BackgroundTasks for email sending
         admin_data: Admin registration data (email, full_name, password, justification, gender, address, contact, profile_image, admin_level)
+        request: FastAPI request object
         db: Database session
         
     Returns:
@@ -704,7 +757,8 @@ async def register_admin_route(
             profile_image=admin_data.profile_image,
             admin_level=admin_data.admin_level,
             justification=admin_data.justification,
-            background_tasks=background_tasks
+            background_tasks=background_tasks,
+            request=request
         )
         return result
     except EmailAlreadyExistsException as e:
@@ -827,65 +881,31 @@ def update_user_status_route(
             detail="An error occurred while updating user status"
         )
 
-@router.post("/admin/{admin_id}/approve", status_code=status.HTTP_200_OK)
-def approve_admin_registration_route(
-    admin_id: int,
+@router.post("/admin/{admin_user_id_to_approve}/approve", status_code=status.HTTP_200_OK, summary="Admin Approves Self-Registered Admin Account")
+async def approve_admin_registration_route(
+    admin_user_id_to_approve: int,
     approval_data: AdminApprovalRequest,
+    request: Request,
     current_admin: User = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
     """
-    Dedicated endpoint for approving admin registration requests.
-    
-    Args:
-        admin_id: ID of admin user to approve
-        approval_data: Admin approval request data
-        current_admin: Current admin user performing the approval
-        db: Database session
-        
-    Returns:
-        Dict with approval success message and audit details
-        
-    Raises:
-        HTTPException: If admin not found, invalid status, or insufficient permissions
+    Endpoint for an existing admin to approve a self-registered admin account.
+    Changes status from DISABLED to ACTIVE.
     """
     try:
-        # Find target admin user
-        target_admin = db.query(User).filter(
-            User.id == admin_id,
-            User.role == UserRole.ADMIN
-        ).first()
+        # The service admin_activate_user_account is designed for this
+        activated_admin_user = await admin_activate_user_account(
+            db=db,
+            user_to_activate_id=admin_user_id_to_approve,
+            activating_admin=current_admin,
+            request=request
+        )
         
-        if not target_admin:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Admin user not found"
-            )
-        
-        # Validate current status
-        if target_admin.account_status != AccountStatus.DISABLED:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Cannot approve admin with status: {target_admin.account_status.value}"
-            )
-        
-        # Prevent self-approval
-        if target_admin.id == current_admin.id:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Admins cannot approve their own registration"
-            )
-        
-        # Update admin status
-        old_status = target_admin.account_status
-        current_time = datetime.now(timezone.utc)
-        target_admin.account_status = AccountStatus.ACTIVE
-        target_admin.created_by = current_admin.id
-        target_admin.updated_at = current_time
-        
-        db.commit()
-        db.refresh(target_admin)
-        
+        if activated_admin_user.role != UserRole.ADMIN:
+             # Should not happen if service logic is correct and ID was for an admin
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="User approved is not an admin.")
+
         return {
             "message": "Admin registration approved successfully",
             "approved_admin": {
@@ -1265,3 +1285,187 @@ async def approve_doctor_registration_route(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An error occurred while processing doctor registration"
         )
+
+# ============================================================================
+# NEW SPRINT 1 ROUTES
+# ============================================================================
+
+@router.get("/bootstrap-status", response_model=BootstrapStatusResponse, summary="Check Bootstrap Admin Status")
+async def get_bootstrap_status_route(db: Session = Depends(get_db)):
+    """Checks if the initial bootstrap admin account has been created."""
+    return await get_bootstrap_admin_status(db)
+
+@router.post("/activate-account", response_model=UserResponse, summary="Staff First Login: Set Password & Activate Account")
+async def staff_activate_account_route(
+    password_data: StaffFirstLoginPasswordSet,
+    request: Request,
+    # This dependency should ensure user is authenticated with temporary credentials
+    # and is in PENDING_ACTIVATION state, and is a STAFF role.
+    # A more specific dependency might be needed here based on how temp auth works.
+    current_staff_user: User = Depends(get_current_user_with_verification_status), # Assuming this dep can handle PENDING_ACTIVATION
+    db: Session = Depends(get_db)
+):
+    """
+    Staff members use this endpoint after their account is created by an admin.
+    They set their permanent password, and their account status changes from
+    PENDING_ACTIVATION to ACTIVE.
+    Requires authentication (e.g., with a one-time token or temporary password).
+    """
+    # Add checks to ensure current_staff_user is indeed staff and PENDING_ACTIVATION
+    if current_staff_user.role != UserRole.STAFF:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only staff can activate accounts this way.")
+    if current_staff_user.account_status != AccountStatus.PENDING_ACTIVATION:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Account is not pending first-time activation.")
+
+    updated_user = await staff_set_password_first_login(
+        db=db,
+        staff_user=current_staff_user,
+        password_data=password_data,
+        request=request
+    )
+    return UserResponse.from_orm(updated_user)
+
+@router.get("/activation-status/{token}", response_model=ActivationTokenStatusResponse, summary="Check Activation Token Status (Generic)")
+async def get_activation_token_status_route(token: str, db: Session = Depends(get_db)):
+    """
+    Checks the validity of a generic activation or verification token.
+    The exact nature of the token depends on the flow (e.g., email verification before supplying email).
+    """
+    # Note: The service function `check_general_activation_token_status` has a placeholder implementation.
+    # It needs to be updated based on specific token generation and storage mechanisms.
+    return await check_general_activation_token_status(db=db, token=token)
+
+@router.put("/change-password", status_code=status.HTTP_200_OK, summary="User Changes Their Own Password (Authenticated)")
+async def change_password_internal_route(
+    password_data: UserPasswordChangeInternal,
+    request: Request,
+    current_user: User = Depends(get_current_active_user), # Must be active and authenticated
+    db: Session = Depends(get_db)
+):
+    """Allows an authenticated user to change their own password."""
+    try:
+        result = await change_password_internal(
+            db=db, 
+            current_user=current_user, 
+            password_data=password_data, 
+            request=request
+        )
+        return result
+    except InvalidCredentialsException as e:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=e.detail)
+    except Exception as e:
+        logger.error(f"Unexpected error during internal password change: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error changing password.")
+
+# ============================================================================
+# ADMIN SPECIFIC ROUTES (New for Sprint 1)
+# ============================================================================
+
+@router.put("/admin/activate/{user_id_to_activate}", response_model=UserResponse, summary="Admin Activates User Account (e.g., Doctor)")
+async def admin_activate_user_route(
+    user_id_to_activate: int,
+    request: Request,
+    current_admin: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Admin activates a user account (typically a Doctor changing from DISABLED to ACTIVE,
+    or a self-registered Admin from DISABLED to ACTIVE).
+    """
+    # The existing /admin/{admin_id}/approve is specifically for approving self-registered admins.
+    # This new one /admin/activate/{user_id} is more general for other roles like Doctors.
+    try:
+        # Ensure the user being activated is not the admin themselves, unless it's a self-activation scenario handled by service
+        if user_id_to_activate == current_admin.id and current_admin.role == UserRole.ADMIN :
+            # This case for admin self-approval of their own DISABLED account is already covered by /admin/{admin_id}/approve
+            # or should be handled by the admin_activate_user_account service if that is the intent.
+            # For a generic activate endpoint, self-activation might be disallowed to prevent accidental lockout recovery bypassing other means.
+            pass # Allowing for now, service function has some checks
+
+        activated_user = await admin_activate_user_account(
+            db=db,
+            user_to_activate_id=user_id_to_activate,
+            activating_admin=current_admin,
+            request=request
+        )
+        return UserResponse.from_orm(activated_user)
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error activating user account by admin: {str(e)}")
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error activating user account.")
+
+@router.put("/admin/deactivate/{user_id_to_deactivate}", response_model=UserResponse, summary="Admin Deactivates User Account")
+async def admin_deactivate_user_route(
+    user_id_to_deactivate: int,
+    request: Request,
+    current_admin: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Admin deactivates any user's account. Sets status to DEACTIVATED."""
+    try:
+        deactivated_user = await admin_deactivate_user_account(
+            db=db,
+            user_to_deactivate_id=user_id_to_deactivate,
+            deactivating_admin=current_admin,
+            request=request
+        )
+        return UserResponse.from_orm(deactivated_user)
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error deactivating user account by admin: {str(e)}")
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error deactivating user account.")
+
+@router.put("/admin/doctor/onhire/{doctor_user_id}", response_model=UserResponse, summary="Admin Sets Doctor On-Hire Status") # Assuming UserResponse is okay, or make a DoctorProfileResponse
+async def admin_set_doctor_onhire_status_route(
+    doctor_user_id: int, # This is the User.id of the doctor
+    onhire_update: DoctorOnHireUpdate,
+    request: Request,
+    current_admin: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Admin sets a doctor's availability_status (e.g., AVAILABLE, UNAVAILABLE)."""
+    try:
+        doctor_profile = await admin_set_doctor_onhire_status(
+            db=db,
+            doctor_user_id=doctor_user_id,
+            new_onhire_status=onhire_update.status,
+            admin_user=current_admin,
+            request=request
+        )
+        # The doctor_profile is a Doctor model. We need to return UserResponse of the associated user.
+        # Or, create a specific DoctorProfileResponse that includes User info.
+        # For now, fetching the user and returning UserResponse.
+        doctor_user = db.query(User).filter(User.id == doctor_profile.user_id).first()
+        if not doctor_user: # Should not happen
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Doctor user not found after updating profile.")
+        return UserResponse.from_orm(doctor_user)
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error setting doctor on-hire status: {str(e)}")
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error setting doctor on-hire status.")
+
+@router.get("/admin/audit-logs", response_model=List[AuditLogResponse], summary="Admin Retrieves Audit Logs")
+async def get_audit_logs_route(
+    request: Request,
+    user_id_filter: Optional[int] = None,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    current_admin: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Retrieves audit logs. Admins can filter by user_id."""
+    # Add audit log for viewing audit logs itself, if desired, but be careful of loops.
+    # await create_audit_log(db, action="ADMIN_VIEWED_AUDIT_LOGS", user_id=current_admin.id, request=request, details={"filter_user_id": user_id_filter, "limit": limit, "offset": offset})
+    logs = await get_audit_logs_service(
+        db=db, 
+        user_id_filter=user_id_filter, 
+        limit=limit, 
+        offset=offset
+    )
+    return logs

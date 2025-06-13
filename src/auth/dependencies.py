@@ -84,7 +84,7 @@ def get_current_active_user(current_user: User = Depends(get_current_user)):
     """
     if not verify_account_status(current_user.account_status, [AccountStatus.ACTIVE]):
         status_messages = {
-            AccountStatus.PENDING_VERIFICATION: "Email verification required",
+            AccountStatus.PENDING_VERIFICATION: "Email verification required. Please check your email for the verification code.",
             AccountStatus.PENDING_ACTIVATION: "Account pending activation by administrator", 
             AccountStatus.DISABLED: "Account disabled, pending approval",
             AccountStatus.DEACTIVATED: "Account has been deactivated",
@@ -176,3 +176,30 @@ def get_current_user_with_verification_status(current_user: User = Depends(get_c
         User: User (regardless of verification status)
     """
     return current_user
+
+def get_optional_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> Optional[User]:
+    """
+    Get current authenticated user from JWT token if available, without raising an error.
+
+    Args:
+        token: JWT token from Authorization header (optional)
+        db: Database session
+
+    Returns:
+        Optional[User]: Current authenticated user or None
+    """
+    if not token:  # Handle cases where the token might not be provided at all for an optional user
+        return None
+    try:
+        payload = verify_token(token)
+        if not payload:
+            return None
+        
+        user_id = payload.get("id")
+        if not user_id:
+            return None
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        return user  # Returns user or None if not found
+    except HTTPException:  # Catch exceptions from verify_token or if user is invalid
+        return None

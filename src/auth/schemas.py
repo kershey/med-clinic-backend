@@ -3,7 +3,7 @@ User Schemas - Pydantic models for user data validation and serialization.
 
 Enhanced to support role-based authentication flow with specific schemas for each user role.
 """
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, EmailStr, Field
 from datetime import datetime
 from .models import UserRole, AccountStatus, DoctorStatus
@@ -288,3 +288,89 @@ class DoctorApprovalRequest(BaseModel):
     """
     is_approved: bool = Field(..., description="Whether to approve or reject the doctor")
     reason: str = Field(..., description="Reason for approval/rejection decision")
+
+class UserPasswordChangeInternal(BaseModel):
+    """
+    Schema for internal password change by an authenticated user.
+    
+    Fields:
+    - current_password: User's current password
+    - new_password: New desired password
+    """
+    current_password: str
+    new_password: str = Field(..., min_length=8)
+
+class DoctorOnHireUpdate(BaseModel):
+    """
+    Schema for Admin to update a Doctor's on-hire status.
+    
+    Fields:
+    - status: The new on-hire status for the doctor.
+    """
+    status: DoctorStatus
+
+class StaffFirstLoginPasswordSet(BaseModel):
+    """
+    Schema for staff to set their password on first login after admin creation.
+    
+    Fields:
+    - new_password: The new password to set.
+    - confirm_password: Confirmation of the new password.
+    """
+    new_password: str = Field(..., min_length=8)
+    confirm_password: str
+
+class AuditLogBase(BaseModel):
+    """Base schema for Audit Log entries."""
+    action: str
+    details: Optional[Dict[str, Any]] = None
+    ip_address: Optional[str] = None
+
+class AuditLogCreate(AuditLogBase):
+    """Schema for creating an Audit Log entry."""
+    user_id: Optional[int] = None # Can be null for system actions
+
+class AuditLogResponse(AuditLogBase):
+    """
+    Schema for returning Audit Log entries.
+    
+    Fields:
+    - id: Audit Log ID
+    - user_id: ID of the user who performed the action (if applicable)
+    - username: Username or email of the user (if applicable)
+    - action: Description of the action performed
+    - details: Optional dictionary with additional details about the action
+    - ip_address: IP address from which the action was performed
+    - timestamp: Timestamp of when the action occurred
+    """
+    id: int
+    user_id: Optional[int] = None
+    username: Optional[str] = None 
+    timestamp: datetime
+
+    class Config:
+        from_attributes = True
+
+class BootstrapStatusResponse(BaseModel):
+    """
+    Response schema for checking bootstrap admin status.
+    
+    Fields:
+    - bootstrap_admin_exists: Boolean indicating if the bootstrap admin is set up.
+    - message: A descriptive message.
+    """
+    bootstrap_admin_exists: bool
+    message: str
+
+class ActivationTokenStatusResponse(BaseModel):
+    """
+    Response schema for checking activation token status.
+
+    Fields:
+    - is_valid: Boolean indicating if the token is valid.
+    - message: A descriptive message (e.g., "Token is valid" or "Token expired/not found").
+    - email: Optional email associated with the token if valid.
+    """
+    is_valid: bool
+    message: str
+    email: Optional[EmailStr] = None

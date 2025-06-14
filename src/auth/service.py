@@ -4,7 +4,7 @@ Authentication service layer for business logic.
 import logging
 from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
-from fastapi import BackgroundTasks, HTTPException, status, Request
+from fastapi import BackgroundTasks, HTTPException, status, Request, UploadFile
 from pydantic import EmailStr
 from typing import Dict, Any, Optional, Tuple, List
 
@@ -23,7 +23,10 @@ from ..core.audit_service import create_audit_log
 from ..core.audit_models import AuditLog
 from .models import User, UserRole, AccountStatus, DoctorStatus
 from ..doctors.models import Doctor
-from .schemas import UserPasswordChangeInternal, StaffFirstLoginPasswordSet, AuditLogResponse
+from .schemas import (
+    UserPasswordChangeInternal, StaffFirstLoginPasswordSet, AuditLogResponse,
+    PatientProfileUpdate, DoctorProfileUpdate, StaffProfileUpdate, AdminProfileUpdate
+)
 from .utils import (
     generate_verification_code,
     send_verification_email,
@@ -42,6 +45,7 @@ from .exceptions import (
     AccountLockedException
 )
 from ..config import settings
+from ..core.cloudinary import upload_profile_image # Added for profile image uploads
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -995,6 +999,319 @@ async def admin_activate_user_account(
 
     return user_to_activate
 
+
+async def update_patient_profile(
+    db: Session,
+    current_user: User,
+    update_data: PatientProfileUpdate,
+    profile_image_file: Optional[UploadFile] = None,
+    request: Optional[Request] = None
+) -> User:
+    """
+    Update patient's profile information, including profile image.
+    """
+    logger.info(f"Updating profile for patient {current_user.id}")
+    await create_audit_log(db, action="PATIENT_PROFILE_UPDATE_INITIATED", user_id=current_user.id, request=request, details=update_data.model_dump())
+
+    image_url_to_save = current_user.profile_image # Keep existing image if new one fails or isn't provided
+
+    if profile_image_file:
+        logger.info(f"Attempting to upload new profile image for patient {current_user.id}")
+        try:
+            # Validate image type and size (already done in router, but good for service layer too)
+            if profile_image_file.content_type not in ["image/jpeg", "image/png", "image/webp"]:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid image type. Only JPG, PNG, WEBP allowed.")
+            if profile_image_file.size and profile_image_file.size > 2 * 1024 * 1024: # 2MB
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Image too large. Max 2MB allowed.")
+
+            uploaded_image_url = upload_profile_image(profile_image_file.file)
+            
+            if uploaded_image_url:
+                image_url_to_save = uploaded_image_url
+                logger.info(f"Successfully uploaded new profile image for patient {current_user.id}. URL: {image_url_to_save}")
+            else:
+                logger.error(f"Profile image upload failed for patient {current_user.id}. No URL returned from Cloudinary.")
+                await create_audit_log(db, action="PATIENT_PROFILE_IMAGE_UPLOAD_FAILED", user_id=current_user.id, request=request, details={"error": "Cloudinary upload returned no URL"})
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Profile image upload failed. Please try again or contact support."
+                )
+        except HTTPException as http_exc: # Re-raise known HTTP exceptions
+            raise http_exc
+        except Exception as e:
+            logger.error(f"Error processing profile image for patient {current_user.id}: {str(e)}")
+            await create_audit_log(db, action="PATIENT_PROFILE_IMAGE_PROCESSING_ERROR", user_id=current_user.id, request=request, details={"error": str(e)})
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="An error occurred while processing the profile image. Please try again."
+            )
+    
+    # Update user fields
+    updated_fields_count = 0
+    for field, value in update_data.model_dump(exclude_unset=True).items():
+        if hasattr(current_user, field) and getattr(current_user, field) != value:
+            setattr(current_user, field, value)
+            updated_fields_count += 1
+            logger.debug(f"Patient {current_user.id}: Updated {field} to {value}")
+
+    # Update profile image URL if a new one was successfully uploaded
+    if image_url_to_save != current_user.profile_image:
+        current_user.profile_image = image_url_to_save
+        updated_fields_count +=1
+        logger.info(f"Patient {current_user.id}: Updated profile_image to {image_url_to_save}")
+
+
+    if updated_fields_count > 0:
+        current_user.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(current_user)
+        logger.info(f"Patient profile updated successfully for user {current_user.id}")
+        await create_audit_log(db, action="PATIENT_PROFILE_UPDATE_SUCCESS", user_id=current_user.id, request=request, details={"updated_fields_count": updated_fields_count})
+    else:
+        logger.info(f"No changes detected for patient profile {current_user.id}")
+        await create_audit_log(db, action="PATIENT_PROFILE_UPDATE_NO_CHANGES", user_id=current_user.id, request=request)
+
+    return current_user
+
+async def update_doctor_profile(
+    db: Session,
+    current_user: User,
+    update_data: DoctorProfileUpdate,
+    profile_image_file: Optional[UploadFile] = None,
+    request: Optional[Request] = None
+) -> User:
+    """
+    Update doctor's profile information, including profile image and doctor-specific fields.
+    """
+    logger.info(f"Updating profile for doctor {current_user.id}")
+    await create_audit_log(db, action="DOCTOR_PROFILE_UPDATE_INITIATED", user_id=current_user.id, request=request, details=update_data.model_dump())
+
+    image_url_to_save = current_user.profile_image
+
+    if profile_image_file:
+        logger.info(f"Attempting to upload new profile image for doctor {current_user.id}")
+        try:
+            if profile_image_file.content_type not in ["image/jpeg", "image/png", "image/webp"]:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid image type. Only JPG, PNG, WEBP allowed.")
+            if profile_image_file.size and profile_image_file.size > 2 * 1024 * 1024:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Image too large. Max 2MB allowed.")
+
+            uploaded_image_url = upload_profile_image(profile_image_file.file)
+            
+            if uploaded_image_url:
+                image_url_to_save = uploaded_image_url
+                logger.info(f"Successfully uploaded new profile image for doctor {current_user.id}. URL: {image_url_to_save}")
+            else:
+                logger.error(f"Profile image upload failed for doctor {current_user.id}. No URL returned from Cloudinary.")
+                await create_audit_log(db, action="DOCTOR_PROFILE_IMAGE_UPLOAD_FAILED", user_id=current_user.id, request=request, details={"error": "Cloudinary upload returned no URL"})
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Profile image upload failed. Please try again or contact support."
+                )
+        except HTTPException as http_exc:
+            raise http_exc
+        except Exception as e:
+            logger.error(f"Error processing profile image for doctor {current_user.id}: {str(e)}")
+            await create_audit_log(db, action="DOCTOR_PROFILE_IMAGE_PROCESSING_ERROR", user_id=current_user.id, request=request, details={"error": str(e)})
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="An error occurred while processing the profile image. Please try again."
+            )
+
+    # Update base User fields
+    updated_fields_count = 0
+    user_update_payload = update_data.model_dump(exclude_unset=True, exclude={'specialization', 'bio'}) # Exclude doctor-specific fields for now
+    for field, value in user_update_payload.items():
+        if hasattr(current_user, field) and getattr(current_user, field) != value:
+            setattr(current_user, field, value)
+            updated_fields_count += 1
+            logger.debug(f"Doctor User {current_user.id}: Updated {field} to {value}")
+            
+    # Update profile image URL if a new one was successfully uploaded
+    if image_url_to_save != current_user.profile_image:
+        current_user.profile_image = image_url_to_save
+        updated_fields_count +=1
+        logger.info(f"Doctor User {current_user.id}: Updated profile_image to {image_url_to_save}")
+
+    # Update Doctor-specific fields (specialization, bio)
+    doctor_profile = current_user.doctor_profile
+    if not doctor_profile:
+        # This case should ideally not happen if a doctor user always has a doctor_profile
+        # For robustness, create one if missing, or log an error
+        logger.error(f"Doctor profile not found for doctor user {current_user.id} during update. Creating one.")
+        from ..doctors.models import Doctor # Lazy import to avoid circular dependency
+        doctor_profile = Doctor(user_id=current_user.id)
+        current_user.doctor_profile = doctor_profile # Establish relationship
+        db.add(doctor_profile)
+
+
+    if update_data.specialization is not None and doctor_profile.specialization != update_data.specialization:
+        doctor_profile.specialization = update_data.specialization
+        updated_fields_count += 1
+        logger.debug(f"Doctor Profile {doctor_profile.id}: Updated specialization to {update_data.specialization}")
+
+    if update_data.bio is not None and doctor_profile.bio != update_data.bio:
+        doctor_profile.bio = update_data.bio
+        updated_fields_count += 1
+        logger.debug(f"Doctor Profile {doctor_profile.id}: Updated bio to {update_data.bio}")
+
+
+    if updated_fields_count > 0:
+        current_user.updated_at = datetime.now(timezone.utc)
+        if doctor_profile: # Ensure doctor_profile is part of the session if it was just created
+             db.add(doctor_profile)
+        db.commit()
+        db.refresh(current_user)
+        if doctor_profile:
+            db.refresh(doctor_profile)
+        logger.info(f"Doctor profile updated successfully for user {current_user.id}")
+        await create_audit_log(db, action="DOCTOR_PROFILE_UPDATE_SUCCESS", user_id=current_user.id, request=request, details={"updated_fields_count": updated_fields_count})
+
+    else:
+        logger.info(f"No changes detected for doctor profile {current_user.id}")
+        await create_audit_log(db, action="DOCTOR_PROFILE_UPDATE_NO_CHANGES", user_id=current_user.id, request=request)
+        
+    return current_user
+
+async def update_staff_profile(
+    db: Session,
+    current_user: User,
+    update_data: StaffProfileUpdate,
+    profile_image_file: Optional[UploadFile] = None,
+    request: Optional[Request] = None
+) -> User:
+    """
+    Update staff's profile information, including profile image.
+    """
+    logger.info(f"Updating profile for staff {current_user.id}")
+    await create_audit_log(db, action="STAFF_PROFILE_UPDATE_INITIATED", user_id=current_user.id, request=request, details=update_data.model_dump())
+
+    image_url_to_save = current_user.profile_image
+
+    if profile_image_file:
+        logger.info(f"Attempting to upload new profile image for staff {current_user.id}")
+        try:
+            if profile_image_file.content_type not in ["image/jpeg", "image/png", "image/webp"]:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid image type. Only JPG, PNG, WEBP allowed.")
+            if profile_image_file.size and profile_image_file.size > 2 * 1024 * 1024:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Image too large. Max 2MB allowed.")
+
+            uploaded_image_url = upload_profile_image(profile_image_file.file)
+            
+            if uploaded_image_url:
+                image_url_to_save = uploaded_image_url
+                logger.info(f"Successfully uploaded new profile image for staff {current_user.id}. URL: {image_url_to_save}")
+            else:
+                logger.error(f"Profile image upload failed for staff {current_user.id}. No URL returned from Cloudinary.")
+                await create_audit_log(db, action="STAFF_PROFILE_IMAGE_UPLOAD_FAILED", user_id=current_user.id, request=request, details={"error": "Cloudinary upload returned no URL"})
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Profile image upload failed. Please try again or contact support."
+                )
+        except HTTPException as http_exc:
+            raise http_exc
+        except Exception as e:
+            logger.error(f"Error processing profile image for staff {current_user.id}: {str(e)}")
+            await create_audit_log(db, action="STAFF_PROFILE_IMAGE_PROCESSING_ERROR", user_id=current_user.id, request=request, details={"error": str(e)})
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="An error occurred while processing the profile image. Please try again."
+            )
+
+    updated_fields_count = 0
+    for field, value in update_data.model_dump(exclude_unset=True).items():
+        if hasattr(current_user, field) and getattr(current_user, field) != value:
+            setattr(current_user, field, value)
+            updated_fields_count += 1
+            logger.debug(f"Staff {current_user.id}: Updated {field} to {value}")
+
+    if image_url_to_save != current_user.profile_image:
+        current_user.profile_image = image_url_to_save
+        updated_fields_count +=1
+        logger.info(f"Staff {current_user.id}: Updated profile_image to {image_url_to_save}")
+
+    if updated_fields_count > 0:
+        current_user.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(current_user)
+        logger.info(f"Staff profile updated successfully for user {current_user.id}")
+        await create_audit_log(db, action="STAFF_PROFILE_UPDATE_SUCCESS", user_id=current_user.id, request=request, details={"updated_fields_count": updated_fields_count})
+    else:
+        logger.info(f"No changes detected for staff profile {current_user.id}")
+        await create_audit_log(db, action="STAFF_PROFILE_UPDATE_NO_CHANGES", user_id=current_user.id, request=request)
+        
+    return current_user
+
+async def update_admin_profile(
+    db: Session,
+    current_user: User,
+    update_data: AdminProfileUpdate,
+    profile_image_file: Optional[UploadFile] = None,
+    request: Optional[Request] = None
+) -> User:
+    """
+    Update admin's profile information, including profile image and admin-specific fields.
+    """
+    logger.info(f"Updating profile for admin {current_user.id}")
+    await create_audit_log(db, action="ADMIN_PROFILE_UPDATE_INITIATED", user_id=current_user.id, request=request, details=update_data.model_dump())
+
+    image_url_to_save = current_user.profile_image
+
+    if profile_image_file:
+        logger.info(f"Attempting to upload new profile image for admin {current_user.id}")
+        try:
+            if profile_image_file.content_type not in ["image/jpeg", "image/png", "image/webp"]:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid image type. Only JPG, PNG, WEBP allowed.")
+            if profile_image_file.size and profile_image_file.size > 2 * 1024 * 1024:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Image too large. Max 2MB allowed.")
+
+            uploaded_image_url = upload_profile_image(profile_image_file.file)
+            
+            if uploaded_image_url:
+                image_url_to_save = uploaded_image_url
+                logger.info(f"Successfully uploaded new profile image for admin {current_user.id}. URL: {image_url_to_save}")
+            else:
+                logger.error(f"Profile image upload failed for admin {current_user.id}. No URL returned from Cloudinary.")
+                await create_audit_log(db, action="ADMIN_PROFILE_IMAGE_UPLOAD_FAILED", user_id=current_user.id, request=request, details={"error": "Cloudinary upload returned no URL"})
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Profile image upload failed. Please try again or contact support."
+                )
+        except HTTPException as http_exc:
+            raise http_exc
+        except Exception as e:
+            logger.error(f"Error processing profile image for admin {current_user.id}: {str(e)}")
+            await create_audit_log(db, action="ADMIN_PROFILE_IMAGE_PROCESSING_ERROR", user_id=current_user.id, request=request, details={"error": str(e)})
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="An error occurred while processing the profile image. Please try again."
+            )
+
+    updated_fields_count = 0
+    for field, value in update_data.model_dump(exclude_unset=True).items():
+        if hasattr(current_user, field) and getattr(current_user, field) != value:
+            setattr(current_user, field, value)
+            updated_fields_count += 1
+            logger.debug(f"Admin {current_user.id}: Updated {field} to {value}")
+
+    if image_url_to_save != current_user.profile_image:
+        current_user.profile_image = image_url_to_save
+        updated_fields_count +=1
+        logger.info(f"Admin {current_user.id}: Updated profile_image to {image_url_to_save}")
+
+    if updated_fields_count > 0:
+        current_user.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(current_user)
+        logger.info(f"Admin profile updated successfully for user {current_user.id}")
+        await create_audit_log(db, action="ADMIN_PROFILE_UPDATE_SUCCESS", user_id=current_user.id, request=request, details={"updated_fields_count": updated_fields_count})
+    else:
+        logger.info(f"No changes detected for admin profile {current_user.id}")
+        await create_audit_log(db, action="ADMIN_PROFILE_UPDATE_NO_CHANGES", user_id=current_user.id, request=request)
+        
+    return current_user
+
+# Existing function: admin_deactivate_user_account
 async def admin_deactivate_user_account(
     db: Session,
     user_to_deactivate_id: int,

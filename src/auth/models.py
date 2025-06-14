@@ -105,6 +105,7 @@ class User(Base):
     status = Column(Enum(AccountStatus), default=AccountStatus.PENDING_VERIFICATION, name='status')
     profile_image = Column(String, nullable=True)
     verification_code = Column(String, nullable=True)
+    admin_level = Column(Integer, nullable=True) # Added for admin users
     created_by = Column(Integer, nullable=True)  # Foreign key to admin/staff who created this account
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

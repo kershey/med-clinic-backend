@@ -196,6 +196,12 @@ class UserResponse(BaseModel):
     role: UserRole
     account_status: AccountStatus
     profile_image: Optional[str] = None
+    
+    # Added fields for role-specific data
+    specialization: Optional[str] = None # For Doctors
+    bio: Optional[str] = None           # For Doctors
+    admin_level: Optional[int] = None   # For Admins
+
     created_by: Optional[int] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
@@ -371,6 +377,35 @@ class ActivationTokenStatusResponse(BaseModel):
     - message: A descriptive message (e.g., "Token is valid" or "Token expired/not found").
     - email: Optional email associated with the token if valid.
     """
-    is_valid: bool
-    message: str
-    email: Optional[EmailStr] = None
+
+# Schemas for Profile Updates (all fields optional)
+class PatientProfileUpdate(BaseModel):
+    full_name: Optional[str] = None
+    gender: Optional[str] = None
+    address: Optional[str] = None
+    contact: Optional[str] = None
+    # profile_image will be handled as a file upload, not a URL field here
+
+class DoctorProfileUpdate(BaseModel):
+    full_name: Optional[str] = None
+    specialization: Optional[str] = None
+    bio: Optional[str] = None
+    gender: Optional[str] = None
+    address: Optional[str] = None
+    contact: Optional[str] = None
+
+class StaffProfileUpdate(BaseModel):
+    full_name: Optional[str] = None
+    gender: Optional[str] = None
+    address: Optional[str] = None
+    contact: Optional[str] = None
+    # Add other staff-specific editable fields if any
+
+class AdminProfileUpdate(BaseModel):
+    full_name: Optional[str] = None
+    gender: Optional[str] = None
+    address: Optional[str] = None
+    contact: Optional[str] = None
+    admin_level: Optional[int] = Field(None, ge=1, le=5, description="Admin access level")
+    # justification is usually set at creation, consider if it's editable
+

@@ -25,7 +25,8 @@ from .schemas import (
     AccountStatusUpdate, PasswordReset, PasswordChange, AdminApprovalRequest, AdminRejectionRequest,
     BootstrapAdminRequest, StaffActivation, DoctorApprovalRequest,
     UserPasswordChangeInternal, DoctorOnHireUpdate, StaffFirstLoginPasswordSet,
-    AuditLogResponse, BootstrapStatusResponse, ActivationTokenStatusResponse
+    AuditLogResponse, BootstrapStatusResponse, ActivationTokenStatusResponse,
+    PatientProfileUpdate, DoctorProfileUpdate, StaffProfileUpdate, AdminProfileUpdate # Added
 )
 from .dependencies import (
     get_current_user, get_current_active_user, require_staff_or_admin, require_admin,
@@ -37,7 +38,8 @@ from .service import (
     create_bootstrap_admin, register_staff, register_admin,
     change_password_internal, admin_activate_user_account, admin_deactivate_user_account,
     admin_set_doctor_onhire_status, staff_set_password_first_login,
-    get_bootstrap_admin_status, check_general_activation_token_status, get_audit_logs_service
+    get_bootstrap_admin_status, check_general_activation_token_status, get_audit_logs_service,
+    update_patient_profile, update_doctor_profile, update_staff_profile, update_admin_profile # Added
 )
 from .exceptions import (
     InvalidCredentialsException, EmailAlreadyExistsException,
@@ -583,6 +585,259 @@ async def get_current_user_profile(
     """
     await create_audit_log(db, action="USER_PROFILE_VIEWED", user_id=current_user.id, request=request)
     return current_user
+
+    await create_audit_log(db, action="USER_PROFILE_VIEWED", user_id=current_user.id, request=request)
+    return current_user
+
+# ============================================================================
+# USER PROFILE MANAGEMENT ROUTES
+# ============================================================================
+
+@router.put("/users/me/patient", response_model=UserResponse, summary="Update Current Patient Profile")
+async def update_patient_profile_route(
+    request: Request,
+    full_name: Optional[str] = Form(None),
+    gender: Optional[str] = Form(None),
+    address: Optional[str] = Form(None),
+    contact: Optional[str] = Form(None),
+    profile_image: Optional[UploadFile] = File(None),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Update the currently authenticated patient's profile information.
+    Only editable fields for a patient are accepted.
+    """
+    if current_user.role != UserRole.PATIENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Operation not permitted. This endpoint is for patients only."
+        )
+
+    update_data_fields = {
+        "full_name": full_name,
+        "gender": gender,
+        "address": address,
+        "contact": contact,
+    }
+    # Filter out None values to allow partial updates, Pydantic model will handle validation
+    update_data_payload = {k: v for k, v in update_data_fields.items() if v is not None}
+    
+    # Validate with the Pydantic schema
+    try:
+        patient_update_schema = PatientProfileUpdate(**update_data_payload)
+    except Exception as e: # Catch Pydantic validation error if any
+        logger.warning(f"Pydantic validation error for patient profile update {current_user.id}: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Invalid data provided: {str(e)}")
+
+    try:
+        if profile_image:
+            if profile_image.content_type not in ["image/jpeg", "image/png", "image/webp"]:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid image type. Only JPG, PNG, WEBP allowed.")
+            if profile_image.size and profile_image.size > 2 * 1024 * 1024: # 2MB
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Image too large. Max 2MB allowed.")
+        
+        updated_user = await update_patient_profile(
+            db=db,
+            current_user=current_user,
+            update_data=patient_update_schema,
+            profile_image_file=profile_image,
+            request=request
+        )
+        return updated_user
+    except HTTPException as e:
+        raise e # Re-raise known HTTPExceptions (e.g. from image validation)
+    except Exception as e:
+        logger.error(f"Error updating patient profile for user {current_user.id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while updating the profile."
+        )
+
+@router.put("/users/me/doctor", response_model=UserResponse, summary="Update Current Doctor Profile")
+async def update_doctor_profile_route(
+    request: Request,
+    full_name: Optional[str] = Form(None),
+    gender: Optional[str] = Form(None),
+    address: Optional[str] = Form(None),
+    contact: Optional[str] = Form(None),
+    specialization: Optional[str] = Form(None),
+    bio: Optional[str] = Form(None),
+    profile_image: Optional[UploadFile] = File(None),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Update the currently authenticated doctor's profile information.
+    Includes doctor-specific fields like specialization and bio.
+    """
+    if current_user.role != UserRole.DOCTOR:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Operation not permitted. This endpoint is for doctors only."
+        )
+
+    update_data_fields = {
+        "full_name": full_name,
+        "gender": gender,
+        "address": address,
+        "contact": contact,
+        "specialization": specialization,
+        "bio": bio,
+    }
+    update_data_payload = {k: v for k, v in update_data_fields.items() if v is not None}
+
+    try:
+        doctor_update_schema = DoctorProfileUpdate(**update_data_payload)
+    except Exception as e:
+        logger.warning(f"Pydantic validation error for doctor profile update {current_user.id}: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Invalid data provided: {str(e)}")
+
+    try:
+        if profile_image:
+            if profile_image.content_type not in ["image/jpeg", "image/png", "image/webp"]:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid image type. Only JPG, PNG, WEBP allowed.")
+            if profile_image.size and profile_image.size > 2 * 1024 * 1024: # 2MB
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Image too large. Max 2MB allowed.")
+
+        updated_user = await update_doctor_profile(
+            db=db,
+            current_user=current_user,
+            update_data=doctor_update_schema,
+            profile_image_file=profile_image,
+            request=request
+        )
+        return updated_user
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error updating doctor profile for user {current_user.id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while updating the profile."
+        )
+
+@router.put("/users/me/staff", response_model=UserResponse, summary="Update Current Staff Profile")
+async def update_staff_profile_route(
+    request: Request,
+    full_name: Optional[str] = Form(None),
+    gender: Optional[str] = Form(None),
+    address: Optional[str] = Form(None),
+    contact: Optional[str] = Form(None),
+    # Add other staff-specific editable Form fields here if any
+    profile_image: Optional[UploadFile] = File(None),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Update the currently authenticated staff member's profile information.
+    """
+    if current_user.role != UserRole.STAFF:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Operation not permitted. This endpoint is for staff only."
+        )
+
+    update_data_fields = {
+        "full_name": full_name,
+        "gender": gender,
+        "address": address,
+        "contact": contact,
+        # Populate other staff-specific fields from Form inputs
+    }
+    update_data_payload = {k: v for k, v in update_data_fields.items() if v is not None}
+
+    try:
+        staff_update_schema = StaffProfileUpdate(**update_data_payload)
+    except Exception as e:
+        logger.warning(f"Pydantic validation error for staff profile update {current_user.id}: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Invalid data provided: {str(e)}")
+
+    try:
+        if profile_image:
+            if profile_image.content_type not in ["image/jpeg", "image/png", "image/webp"]:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid image type. Only JPG, PNG, WEBP allowed.")
+            if profile_image.size and profile_image.size > 2 * 1024 * 1024: # 2MB
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Image too large. Max 2MB allowed.")
+
+        updated_user = await update_staff_profile(
+            db=db,
+            current_user=current_user,
+            update_data=staff_update_schema,
+            profile_image_file=profile_image,
+            request=request
+        )
+        return updated_user
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error updating staff profile for user {current_user.id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while updating the profile."
+        )
+
+@router.put("/users/me/admin", response_model=UserResponse, summary="Update Current Admin Profile")
+async def update_admin_profile_route(
+    request: Request,
+    full_name: Optional[str] = Form(None),
+    gender: Optional[str] = Form(None),
+    address: Optional[str] = Form(None),
+    contact: Optional[str] = Form(None),
+    admin_level: Optional[int] = Form(None), # Added admin_level
+    profile_image: Optional[UploadFile] = File(None),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Update the currently authenticated admin's profile information.
+    Includes admin-specific fields like admin_level.
+    """
+    if current_user.role != UserRole.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Operation not permitted. This endpoint is for admins only."
+        )
+
+    update_data_fields = {
+        "full_name": full_name,
+        "gender": gender,
+        "address": address,
+        "contact": contact,
+        "admin_level": admin_level,
+    }
+    update_data_payload = {k: v for k, v in update_data_fields.items() if v is not None}
+
+    try:
+        admin_update_schema = AdminProfileUpdate(**update_data_payload)
+    except Exception as e:
+        logger.warning(f"Pydantic validation error for admin profile update {current_user.id}: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Invalid data provided: {str(e)}")
+
+    try:
+        if profile_image:
+            if profile_image.content_type not in ["image/jpeg", "image/png", "image/webp"]:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid image type. Only JPG, PNG, WEBP allowed.")
+            if profile_image.size and profile_image.size > 2 * 1024 * 1024: # 2MB
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Image too large. Max 2MB allowed.")
+
+        updated_user = await update_admin_profile(
+            db=db,
+            current_user=current_user,
+            update_data=admin_update_schema,
+            profile_image_file=profile_image,
+            request=request
+        )
+        return updated_user
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error updating admin profile for user {current_user.id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while updating the profile."
+        )
+
 
 @router.post("/oauth2-token", include_in_schema=False)
 async def oauth2_token_route(
